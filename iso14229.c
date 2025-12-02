@@ -7,6 +7,24 @@
 
 #include "iso14229.h"
 
+#if UDS_SYS == UDS_SYS_RTT
+#ifdef UDS_RTTHREAD_ULOG_ENABLED
+    #define DBG_TAG "UDS.core"
+    #if (UDS_LOG_LEVEL >= UDS_LOG_DEBUG)
+        #define DBG_LVL LOG_LVL_DBG
+    #elif (UDS_LOG_LEVEL == UDS_LOG_INFO)
+        #define DBG_LVL LOG_LVL_INFO
+    #elif (UDS_LOG_LEVEL == UDS_LOG_WARN)
+        #define DBG_LVL LOG_LVL_WARNING
+    #elif (UDS_LOG_LEVEL == UDS_LOG_ERROR)
+        #define DBG_LVL LOG_LVL_ERROR
+    #else
+        #define DBG_LVL LOG_LVL_ASSERT
+    #endif
+    #include <rtdbg.h>
+#endif
+#endif
+
 #ifdef UDS_LINES
 #line 1 "src/client.c"
 #endif
@@ -350,6 +368,50 @@ UDSErr_t UDSSendCommCtrl(UDSClient_t *client, uint8_t ctrl, uint8_t comm) {
     return SendRequest(client);
 }
 
+/**
+ * @brief Sends a CommunicationControl (0x28) request with Enhanced Address Information (NodeID).
+ * 
+ * @param client Pointer to the UDS client instance.
+ * @param ctrl   controlType (Must be 0x04 or 0x05 to include NodeID).
+ * @param comm   communicationType.
+ * @param nodeId nodeIdentificationNumber (2 bytes).
+ * @return UDSErr_t
+ * @addtogroup communicationControl_0x28
+ */
+UDSErr_t UDSSendCommCtrlWithNodeID(UDSClient_t *client, uint8_t ctrl, uint8_t comm, uint16_t nodeId) {
+    UDSErr_t err = PreRequestCheck(client);
+    if (err) return err;
+
+    // ISO 14229-1:2020 Table 53 Note a:
+    // "The presence of the C parameter [nodeIdentificationNumber] requires the controlType 
+    // either being 04 hex or 05 hex."
+    // 
+    // 0x04: enableRxAndDisableTxWithEnhancedAddressInformation
+    // 0x05: enableRxAndTxWithEnhancedAddressInformation
+    if (ctrl != 0x04 && ctrl != 0x05) {
+        return UDS_ERR_INVALID_ARG;
+    }
+
+    // Check buffer capacity for 5 bytes: SID(1) + Ctrl(1) + Comm(1) + NodeID(2)
+    if (sizeof(client->send_buf) < 5) {
+        return UDS_ERR_BUFSIZ;
+    }
+
+    client->send_buf[0] = kSID_COMMUNICATION_CONTROL; // 0x28
+    client->send_buf[1] = ctrl;
+    client->send_buf[2] = comm;
+
+    // ISO 14229-1:2020 Table 55:
+    // "nodeIdentificationNumber: This 2 byte parameter is used to identify a node on a sub-network... 
+    // This parameter is only present, if the SubFunction parameter controlType is set to 
+    // 04 hex or 05 hex."
+    client->send_buf[3] = (nodeId >> 8) & 0xFF;
+    client->send_buf[4] = (nodeId & 0xFF);
+
+    client->send_size = 5;
+    return SendRequest(client);
+}
+
 UDSErr_t UDSSendTesterPresent(UDSClient_t *client) {
     UDSErr_t err = PreRequestCheck(client);
     if (err) {
@@ -542,7 +604,14 @@ UDSErr_t UDSSendTransferData(UDSClient_t *client, uint8_t blockSequenceCounter,
     }
 
     // blockLength must include SID and sequenceCounter
-    if (blockLength <= 2) {
+
+    // ISO 14229-1:2020 Table 450:
+    // The transferRequestParameterRecord parameter is marked as Conditional (C). The legend states:
+    // "C = Conditional: this parameter is mandatory if a download is in progress."
+    // Therefore, if an upload is in progress (e.g. following a RequestUpload 0x35 or RequestFileTransfer 0x38 
+    // with ReadFile/ReadDir), this parameter shall not be included. In this case, the request message 
+    // consists only of the SID (#1) and blockSequenceCounter (#2).
+    if (blockLength < 2) {
         return UDS_ERR_INVALID_ARG;
     }
 
@@ -580,19 +649,38 @@ UDSErr_t UDSSendTransferDataStream(UDSClient_t *client, uint8_t blockSequenceCou
 }
 
 /**
- * @brief
+ * @brief Sends a RequestTransferExit (0x37) service request.
  *
- * @param client
+ * @note The function signature has been modified to include `data` and `size`
+ * arguments to support the optional `transferRequestParameterRecord`.
+ *
+ * @param client Pointer to the UDS client instance.
+ * @param data   Pointer to the optional `transferRequestParameterRecord` data (can be NULL).
+ * @param size   Size of the optional data (in bytes).
  * @return UDSErr_t
  * @addtogroup requestTransferExit_0x37
  */
-UDSErr_t UDSSendRequestTransferExit(UDSClient_t *client) {
+UDSErr_t UDSSendRequestTransferExit(UDSClient_t *client, const uint8_t *data, uint16_t size) {
     UDSErr_t err = PreRequestCheck(client);
     if (err) {
         return err;
     }
     client->send_buf[0] = kSID_REQUEST_TRANSFER_EXIT;
-    client->send_size = 1;
+
+    // ISO 14229-1:2020 Table 456:
+    // The transferRequestParameterRecord parameter is marked as User optional (U).
+    // "This parameter record contains parameter(s) which are required by the server to support the 
+    // transfer exit. Format and length of this parameter(s) are vehicle manufacturer specific."
+    if (data != NULL && size > 0) {
+        if (size > sizeof(client->send_buf) - 1) {
+            return UDS_ERR_BUFSIZ;
+        }
+        memcpy(&client->send_buf[1], data, size);
+        client->send_size = 1 + size;
+    } else {
+        client->send_size = 1;
+    }
+
     return SendRequest(client);
 }
 
@@ -651,6 +739,57 @@ UDSErr_t UDSSendRequestFileTransfer(UDSClient_t *client, uint8_t mode, const cha
     }
 
     client->send_size = (uint16_t)bufSize;
+    return SendRequest(client);
+}
+
+/**
+ * @brief Sends an InputOutputControlByIdentifier (0x2F) service request.
+ *
+ * @param client Pointer to the UDS client instance.
+ * @param did    Data Identifier (2 bytes).
+ * @param param  InputOutputControlParameter (IOCP) (e.g. 0x03 ShortTermAdjustment).
+ * @param data   Pointer to the payload containing `controlState` (if applicable) and/or `controlEnableMask` (if applicable).
+ * @param size   Size of the data buffer.
+ * @return UDSErr_t
+ * @addtogroup ioControlByIdentifier_0x2F
+ */
+UDSErr_t UDSSendIOControl(UDSClient_t *client, uint16_t did, uint8_t param, 
+                          const uint8_t *data, uint16_t size) {
+    UDSErr_t err = PreRequestCheck(client);
+    if (err) return err;
+
+    /* Check buffer size: SID(1) + DID(2) + Param(1) + Data(n) */
+    if (size > sizeof(client->send_buf) - 4) {
+        return UDS_ERR_BUFSIZ;
+    }
+
+    client->send_buf[0] = kSID_IO_CONTROL_BY_IDENTIFIER; // 0x2F
+    client->send_buf[1] = (did >> 8) & 0xFF;
+    client->send_buf[2] = (did & 0xFF);
+    client->send_buf[3] = param;
+
+    // ISO 14229-1:2020 Table 399 & Figure 29:
+    // Request Structure: [SID] [DID] [IOCP] [controlState...] [controlEnableMask...]
+    //
+    // 1. inputOutputControlParameter (IOCP):
+    //    Passed as the 'param' argument (Byte #4).
+    //
+    // 2. controlState (Bytes #5 to #4+m-1):
+    //    Condition C1: Mandatory if IOCP is ShortTermAdjustment (0x03).
+    //    For other values (e.g. ReturnControlToECU, FreezeCurrentState), this is typically omitted.
+    //    See ISO 14229-1:2020 Figure 29 Key 2 for NRC handling logic confirming this structure.
+    //
+    // 3. controlEnableMaskRecord (Bytes #4+m to end):
+    //    Condition C2: Mandatory if the dataIdentifier supports multiple parameters (packeted or bitmapped).
+    //    If supported, it follows the controlState (if present) or immediately follows IOCP.
+    //
+    // The 'data' argument must contain the concatenated bytes of controlState (if any) 
+    // and controlEnableMask (if any).
+    if (data && size > 0) {
+        memmove(&client->send_buf[4], data, size);
+    }
+
+    client->send_size = 4 + size;
     return SendRequest(client);
 }
 
@@ -871,6 +1010,120 @@ UDSErr_t UDSUnpackRDBIResponse(UDSClient_t *client, UDSRDBIVar_t *vars, uint16_t
     return UDS_OK;
 }
 
+/**
+ * @brief Unpacks the RequestFileTransfer (0x38) positive response.
+ *
+ * @param client The UDS client instance.
+ * @param resp   Pointer to the struct to hold parsed data.
+ * @return UDSErr_t
+ */
+UDSErr_t UDSUnpackRequestFileTransferResponse(const UDSClient_t *client,
+                                              struct RequestFileTransferResponse *resp) {
+    if (NULL == client || NULL == resp) {
+        return UDS_ERR_INVALID_ARG;
+    }
+    
+    // 1. Check SID (0x78)
+    if (UDS_RESPONSE_SID_OF(kSID_REQUEST_FILE_TRANSFER) != client->recv_buf[0]) {
+        return UDS_ERR_SID_MISMATCH;
+    }
+    
+    // Minimum length check: SID(1) + Mode(1)
+    if (client->recv_size < 2) {
+        return UDS_ERR_RESP_TOO_SHORT;
+    }
+
+    // Initialize output structure
+    memset(resp, 0, sizeof(struct RequestFileTransferResponse));
+
+    uint16_t idx = 1;
+    resp->modeOfOperation = client->recv_buf[idx++];
+
+    // ISO 14229-1:2020 Table 483:
+    // "If the modeOfOperation parameter equals to 0x02 (DeleteFile) this parameter 
+    // [lengthFormatIdentifier] shall not be included in the response message."
+    if (resp->modeOfOperation == UDS_MOOP_DELFILE) {
+        return UDS_OK;
+    }
+
+    // 2. Parse LFID (LengthFormatIdentifier)
+    if (idx >= client->recv_size) return UDS_ERR_RESP_TOO_SHORT;
+    uint8_t lfid = client->recv_buf[idx++];
+    uint8_t len_bytes = 0;
+
+    // Determine if length is in low nibble (standard 0x38) or high nibble (0x34 style).
+    // ISO 14229-1:2020 Table 487 Example shows LFID=0x02 for a 2-byte length, implying 
+    // the value is directly in the byte (or low nibble).
+    // However, some implementations reuse the 0x34 (RequestDownload) logic where length is in high nibble (0x20).
+    if ((lfid & 0xF0) == 0 && (lfid & 0x0F) != 0) {
+        len_bytes = lfid & 0x0F; // Standard 0x38 style (e.g., 0x04)
+    } else {
+        len_bytes = (lfid & 0xF0) >> 4; // 0x34 style (e.g., 0x40)
+    }
+
+    if (len_bytes > sizeof(size_t) || len_bytes == 0) {
+        return UDS_NRC_IncorrectMessageLengthOrInvalidFormat;
+    }
+
+    // 3. Parse MaxNumberOfBlockLength
+    // ISO 14229-1:2020 Table 482: maxNumberOfBlockLength presence is Conditional (C1, C2).
+    // Defined by lengthFormatIdentifier.
+    if (idx + len_bytes > client->recv_size) return UDS_ERR_RESP_TOO_SHORT;
+    
+    resp->maxNumberOfBlockLength = 0;
+    for (uint8_t i = 0; i < len_bytes; i++) {
+        resp->maxNumberOfBlockLength = (resp->maxNumberOfBlockLength << 8) | client->recv_buf[idx++];
+    }
+
+    // 4. Parse DFI (DataFormatIdentifier)
+    // ISO 14229-1:2020 Table 483:
+    // "If the modeOfOperation parameter equals to 0x02 (DeleteFile) this parameter shall not be included."
+    // (Handled by the check at the top).
+    if (idx >= client->recv_size) {
+        // If data ends here, it is valid for AddFile(0x01) or ReplaceFile(0x03).
+        // ReadFile(0x04) and ReadDir(0x05) require subsequent file size parameters.
+        if (resp->modeOfOperation == UDS_MOOP_RDFILE || resp->modeOfOperation == UDS_MOOP_RDDIR) {
+             return UDS_ERR_RESP_TOO_SHORT;
+        }
+        return UDS_OK;
+    }
+    resp->dataFormatIdentifier = client->recv_buf[idx++];
+
+    // 5. Parse File Sizes (Only for ReadFile/ReadDir)
+    // ISO 14229-1:2020 Table 483:
+    // "If the modeOfOperation parameter equals to 0x01 (AddFile), 0x02 (DeleteFile), 
+    // 0x03 (ReplaceFile) or 0x06 (ResumeFile) this parameter [fileSizeOrDirInfoParameterLength] 
+    // shall not be included in the response message."
+    if (resp->modeOfOperation == UDS_MOOP_RDFILE || resp->modeOfOperation == UDS_MOOP_RDDIR) {
+        
+        // Get fileSizeOrDirInfoParameterLength
+        if (idx >= client->recv_size) return UDS_ERR_RESP_TOO_SHORT;
+        uint8_t size_len = client->recv_buf[idx++];
+
+        if (size_len > sizeof(size_t) || size_len == 0) {
+            return UDS_NRC_IncorrectMessageLengthOrInvalidFormat;
+        }
+
+        // Check if enough bytes remain for Uncompressed + Compressed sizes
+        if (idx + (2 * size_len) > client->recv_size) return UDS_ERR_RESP_TOO_SHORT;
+
+        // Parse fileSizeUncompressedOrDirInfoLength
+        for (uint8_t i = 0; i < size_len; i++) {
+            resp->fileSizeUncompressed = (resp->fileSizeUncompressed << 8) | client->recv_buf[idx++];
+        }
+
+        // Parse fileSizeCompressed
+        for (uint8_t i = 0; i < size_len; i++) {
+            resp->fileSizeCompressed = (resp->fileSizeCompressed << 8) | client->recv_buf[idx++];
+        }
+    }
+    // ISO 14229-1:2020 Table 483:
+    // For modeOfOperation 0x06 (ResumeFile), the response contains 'filePosition' (8 bytes).
+    // Logic for ResumeFile can be added here if the struct RequestFileTransferResponse 
+    // supports a 'filePosition' field.
+
+    return UDS_OK;
+}
 
 #ifdef UDS_LINES
 #line 1 "src/server.c"
@@ -1528,9 +1781,11 @@ static UDSErr_t Handle_0x27_SecurityAccess(UDSServer_t *srv, UDSReq_t *r) {
 }
 
 static UDSErr_t Handle_0x28_CommunicationControl(UDSServer_t *srv, UDSReq_t *r) {
-    uint8_t controlType = r->recv_buf[1] & 0x7F;
+    uint8_t controlType = r->recv_buf[1] & 0x7F; // Mask out SuppressPosRsp bit
     uint8_t communicationType = r->recv_buf[2];
 
+    // ISO 14229-1:2020 Table 53: Request message definition
+    // Minimal length: SID (1) + controlType (1) + communicationType (1) = 3 bytes
     if (r->recv_len < UDS_0X28_REQ_BASE_LEN) {
         return NegativeResponse(r, UDS_NRC_IncorrectMessageLengthOrInvalidFormat);
     }
@@ -1541,16 +1796,64 @@ static UDSErr_t Handle_0x28_CommunicationControl(UDSServer_t *srv, UDSReq_t *r) 
         .nodeId = 0,
     };
 
-    if (args.ctrlType == 0x04 || args.ctrlType == 0x05) {
+    // ISO 14229-1:2020 Table 54: Request message SubFunction parameter definition
+    // Check if controlType is within the standard defined range (0x00 - 0x05).
+    // Ranges 0x06-0x3F and 0x7F are ISO Reserved.
+    // Ranges 0x40-0x5F (OEM) and 0x60-0x7E (System Supplier) are implementation specific.
+    //
+    // Note: According to ISO 14229-1:2020 Table 58 (Supported NRCs),
+    // if the SubFunction parameter is not supported, send NRC 0x12 (SFNS).
+    if (controlType > UDS_LEV_CTRLTP_ERXTXWEAI && controlType < 0x40) {
+        return NegativeResponse(r, UDS_NRC_SubFunctionNotSupported);
+    } 
+
+
+    // ISO 14229-1:2020 Table 53 Note a:
+    // "The presence of the C parameter [nodeIdentificationNumber] requires the 
+    // controlType either being 04 hex or 05 hex."
+    if (args.ctrlType == UDS_LEV_CTRLTP_ERXDTXWEAI || args.ctrlType == UDS_LEV_CTRLTP_ERXTXWEAI) {
         if (r->recv_len < UDS_0X28_REQ_BASE_LEN + 2) {
             return NegativeResponse(r, UDS_NRC_IncorrectMessageLengthOrInvalidFormat);
         }
         args.nodeId = (uint16_t)((uint16_t)(r->recv_buf[3] << 8) | (uint16_t)r->recv_buf[4]);
     }
 
+    // ISO 14229-1:2020 Table 58:
+    // NRC 0x31 (RequestOutOfRange) shall be sent if the server detects an error in the 
+    // communicationType or nodeIdentificationNumber parameter.
+    // (Here we validate communicationType simply by masking checking lower bits, 
+    // stricter checks can be added based on Table B.1)
+    if ((communicationType & 0x03) == 0) {
+        return NegativeResponse(r, UDS_NRC_RequestOutOfRange);
+    }
+
+    // Emit event to application layer
     UDSErr_t err = EmitEvent(srv, UDS_EVT_CommCtrl, &args);
     if (UDS_PositiveResponse != err) {
         return NegativeResponse(r, err);
+    }
+
+    /* 
+     * Update Internal Server State
+     * Only update global state for controlTypes 0x00 - 0x03.
+     * Types 0x04/0x05 are for specific sub-network nodes (addressed by NodeID) 
+     * and typically do not change the global state of the receiving server 
+     * unless the NodeID matches this server (which should be handled in EmitEvent).
+     */
+    if (controlType <= UDS_LEV_CTRLTP_DRXTX) {
+        uint8_t scope = communicationType & 0x03; // Mask for valid communication types
+
+        if (scope == UDS_CTP_NCM) {
+            srv->commState_Normal = controlType;
+        }
+        else if (scope == UDS_CTP_NWMCM) {
+            srv->commState_NM = controlType;
+        }
+        else if (scope == UDS_CTP_NWMCM_NCM) {
+            srv->commState_Normal = controlType;
+            srv->commState_NM     = controlType;
+        }
+        // No else needed here as check was done before EmitEvent
     }
 
     r->send_buf[0] = UDS_RESPONSE_SID_OF(kSID_COMMUNICATION_CONTROL);
@@ -2002,7 +2305,7 @@ static UDSErr_t Handle_0x38_RequestFileTransfer(UDSServer_t *srv, UDSReq_t *r) {
     }
 
     uint8_t mode_of_operation = r->recv_buf[1];
-    if (mode_of_operation < UDS_MOOP_ADDFILE || mode_of_operation > UDS_MOOP_RDFILE) {
+    if (mode_of_operation < UDS_MOOP_ADDFILE || mode_of_operation > UDS_MOOP_RSFILE) {
         return NegativeResponse(r, UDS_NRC_IncorrectMessageLengthOrInvalidFormat);
     }
     uint16_t file_path_len = (uint16_t)(((uint16_t)r->recv_buf[2] << 8) + (uint16_t)r->recv_buf[3]);
@@ -2068,6 +2371,7 @@ static UDSErr_t Handle_0x38_RequestFileTransfer(UDSServer_t *srv, UDSReq_t *r) {
         .dataFormatIdentifier = data_format_identifier,
         .fileSizeUnCompressed = file_size_uncompressed,
         .fileSizeCompressed = file_size_compressed,
+        .maxNumberOfBlockLength = UDS_SERVER_DEFAULT_XFER_DATA_MAX_BLOCKLENGTH,
     };
 
     err = EmitEvent(srv, UDS_EVT_RequestFileTransfer, &args);
@@ -2097,6 +2401,27 @@ static UDSErr_t Handle_0x38_RequestFileTransfer(UDSServer_t *srv, UDSReq_t *r) {
         args.dataFormatIdentifier;
 
     r->send_len = UDS_0X38_RESP_BASE_LEN + (size_t)sizeof(args.maxNumberOfBlockLength) + 1;
+
+    // File Sizes (Only for ReadFile 0x04 or ReadDir 0x05)
+    // ISO 14229-1:2020 Table 483:
+    // "If ... 0x01, 0x02, 0x03 or 0x06 ... shall not be included."
+    if (mode_of_operation == UDS_MOOP_RDFILE || mode_of_operation == UDS_MOOP_RDDIR) {
+        size_t idx = r->send_len;
+
+        uint8_t size_len_byte = (uint8_t)sizeof(size_t);
+        r->send_buf[idx++] = size_len_byte;
+
+        for (int i = size_len_byte - 1; i >= 0; i--) {
+            r->send_buf[idx++] = (uint8_t)((args.fileSizeUnCompressed >> (8 * i)) & 0xFF);
+        }
+
+        for (int i = size_len_byte - 1; i >= 0; i--) {
+            r->send_buf[idx++] = (uint8_t)((args.fileSizeCompressed >> (8 * i)) & 0xFF);
+        }
+
+        r->send_len = idx;
+    }
+
     return UDS_PositiveResponse;
 }
 
@@ -2410,6 +2735,9 @@ UDSErr_t UDSServerInit(UDSServer_t *srv) {
     srv->p2_star_ms = UDS_SERVER_DEFAULT_P2_STAR_MS;
     srv->s3_ms = UDS_SERVER_DEFAULT_S3_MS;
     srv->sessionType = UDS_LEV_DS_DS;
+    srv->securityLevel = 0;
+    srv->commState_Normal = UDS_LEV_CTRLTP_ERXTX;
+    srv->commState_NM     = UDS_LEV_CTRLTP_ERXTX;
     srv->p2_timer = UDSMillis() + srv->p2_ms;
     srv->s3_session_timeout_timer = UDSMillis() + srv->s3_ms;
     srv->sec_access_boot_delay_timer =
@@ -2425,6 +2753,8 @@ void UDSServerPoll(UDSServer_t *srv) {
         EmitEvent(srv, UDS_EVT_SessionTimeout, NULL);
         srv->sessionType = UDS_LEV_DS_DS;
         srv->securityLevel = 0;
+        srv->commState_Normal = UDS_LEV_CTRLTP_ERXTX;
+        srv->commState_NM     = UDS_LEV_CTRLTP_ERXTX;
     }
 
     if (srv->ecuResetScheduled && UDSTimeAfter(UDSMillis(), srv->ecuResetTimer)) {
@@ -2491,6 +2821,18 @@ void UDSServerPoll(UDSServer_t *srv) {
         r->recv_len = (size_t)len;
 
         if (r->recv_len > 0) {
+            // ISO 14229-2:2013 Table 6 - S3Server Subsequent stop:
+            // "T_DataSOM.ind that indicates the start of a multi-frame request message or 
+            // T_Data.ind that indicates the reception of any SingleFrame request message."
+            //
+            // Additionally, per Section 7.5: "the S3Server timer is also restarted upon 
+            // the reception of a diagnostic request message that is not supported by the server."
+            //
+            // Therefore, receiving any data in a non-default session must reload the S3 timer 
+            // to prevent session timeout during request processing.
+            if (srv->sessionType != UDS_LEV_DS_DS) {
+                srv->s3_session_timeout_timer = UDSMillis() + srv->s3_ms;
+            }
             UDSErr_t response = evaluateServiceResponse(srv, r);
             srv->requestInProgress = true;
             if (UDS_NRC_RequestCorrectlyReceived_ResponsePending == response) {
@@ -2544,6 +2886,8 @@ uint32_t UDSMillis(void) {
     return millis();
 #elif UDS_SYS == UDS_SYS_ESP32
     return esp_timer_get_time() / 1000;
+#elif UDS_SYS == UDS_SYS_RTT
+    return (uint32_t)rt_tick_get_millisecond();
 #else
 #error "UDSMillis() undefined!"
 #endif
@@ -2731,6 +3075,10 @@ const char *UDSEventToStr(UDSEvent_t evt) {
         return "UDS_EVT_DiagSessCtrl";
     case UDS_EVT_EcuReset:
         return "UDS_EVT_EcuReset";
+    case UDS_EVT_ClearDiagnosticInfo:
+        return "UDS_EVT_ClearDiagnosticInfo";
+    case UDS_EVT_ReadDTCInformation:
+        return "UDS_EVT_ReadDTCInformation";
     case UDS_EVT_ReadDataByIdent:
         return "UDS_EVT_ReadDataByIdent";
     case UDS_EVT_ReadMemByAddr:
@@ -2743,6 +3091,12 @@ const char *UDSEventToStr(UDSEvent_t evt) {
         return "UDS_EVT_SecAccessValidateKey";
     case UDS_EVT_WriteDataByIdent:
         return "UDS_EVT_WriteDataByIdent";
+    case UDS_EVT_WriteMemByAddr:
+        return "UDS_EVT_WriteMemByAddr";
+    case UDS_EVT_DynamicDefineDataId:
+        return "UDS_EVT_DynamicDefineDataId";
+    case UDS_EVT_IOControl:
+        return "UDS_EVT_IOControl";
     case UDS_EVT_RoutineCtrl:
         return "UDS_EVT_RoutineCtrl";
     case UDS_EVT_RequestDownload:
@@ -2759,6 +3113,10 @@ const char *UDSEventToStr(UDSEvent_t evt) {
         return "UDS_EVT_DoScheduledReset";
     case UDS_EVT_RequestFileTransfer:
         return "UDS_EVT_RequestFileTransfer";
+    case UDS_EVT_ControlDTCSetting:
+        return "UDS_EVT_ControlDTCSetting";
+    case UDS_EVT_LinkControl:
+        return "UDS_EVT_LinkControl";
     case UDS_EVT_Poll:
         return "UDS_EVT_Poll";
     case UDS_EVT_SendComplete:
@@ -2855,17 +3213,31 @@ void UDS_LogWrite(UDS_LogLevel_t level, const char *tag, const char *format, ...
     (void)level;
     (void)tag;
     va_start(list, format);
+#if UDS_SYS == UDS_SYS_RTT
+#ifdef UDS_RTTHREAD_ULOG_ENABLED
+    ulog_voutput(DBG_LVL, DBG_TAG, RT_TRUE, RT_NULL, 0, 0, 0, format, list);
+#else
+    char log_buf[UDS_RTTHREAD_LOG_BUFFER_SIZE];
+    rt_vsnprintf(log_buf, sizeof(log_buf), format, list);
+    rt_kprintf("%s", log_buf);
+#endif
+#else
     vprintf(format, list);
+#endif
     va_end(list);
 }
 
 void UDS_LogSDUInternal(UDS_LogLevel_t level, const char *tag, const uint8_t *buffer,
                         size_t buff_len, UDSSDU_t *info) {
     (void)info;
+#if UDS_SYS == UDS_SYS_RTT && defined(UDS_RTTHREAD_ULOG_ENABLED)
+    ulog_hexdump(tag, 16, (rt_uint8_t*)buffer, buff_len);
+#else
     for (unsigned i = 0; i < buff_len; i++) {
         UDS_LogWrite(level, tag, "%02x ", buffer[i]);
     }
     UDS_LogWrite(level, tag, "\n");
+#endif
 }
 #endif
 
@@ -3379,8 +3751,8 @@ static int LinuxSockBind(const char *if_name, uint32_t rxid, uint32_t txid, bool
     }
 
     struct can_isotp_fc_options fcopts = {
-        .bs = 0x10,
-        .stmin = 3,
+        .bs = ISOTP_FC_BS,
+        .stmin = ISOTP_FC_STMIN,
         .wftmax = 0,
     };
     if (setsockopt(fd, SOL_CAN_ISOTP, CAN_ISOTP_RECV_FC, &fcopts, sizeof(fcopts)) < 0) {
