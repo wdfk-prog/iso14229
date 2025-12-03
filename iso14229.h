@@ -22,6 +22,7 @@ extern "C" {
 #define UDS_SYS_WINDOWS 2
 #define UDS_SYS_ARDUINO 3
 #define UDS_SYS_ESP32 4
+#define UDS_SYS_RTT 5
 
 #if !defined(UDS_SYS)
 
@@ -33,6 +34,8 @@ extern "C" {
 #define UDS_SYS UDS_SYS_ARDUINO
 #elif defined(ESP_PLATFORM)
 #define UDS_SYS UDS_SYS_ESP32
+#elif defined(__RTTHREAD__)
+#define UDS_SYS UDS_SYS_RTT
 #else
 #define UDS_SYS UDS_SYS_CUSTOM
 #endif
@@ -110,6 +113,21 @@ typedef SSIZE_T ssize_t;
 
 
 
+#if UDS_SYS == UDS_SYS_RTT
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+#include "rtt_uds_config.h"
+
+#define UDS_TP_ISOTP_C 1
+
+#define strnlen rt_strnlen
+
+#endif
+
+
 /** ISO-TP Maximum Transmissiable Unit (ISO-15764-2-2004 section 5.3.3) */
 #define UDS_ISOTP_MTU (4095)
 
@@ -145,6 +163,26 @@ typedef SSIZE_T ssize_t;
 #ifndef UDS_CLIENT_DEFAULT_S3_MS
 #define UDS_CLIENT_DEFAULT_S3_MS (2000)
 #endif
+
+/** 
+ * @brief Block Size (BS)
+ * 0 = No separation (Maximum speed)
+ * 8 = Standard block size
+ */
+#ifndef ISOTP_FC_BS
+#define ISOTP_FC_BS 0X0A
+#endif
+
+/** 
+ * @brief Separation Time minimum (STmin)
+ * 0    = No wait (Maximum speed)
+ * 1-127 = Milliseconds
+ * 0xF1-0xF9 = 100us-900us
+ */
+#ifndef ISOTP_FC_STMIN
+#define ISOTP_FC_STMIN 3
+#endif
+
 
 static_assert(UDS_CLIENT_DEFAULT_P2_STAR_MS > UDS_CLIENT_DEFAULT_P2_MS, "");
 
@@ -452,6 +490,18 @@ typedef enum {
 #define UDS_LEV_CTRLTP_ERXDTX 1 // EnableRxAndDisableTx
 #define UDS_LEV_CTRLTP_DRXETX 2 // DisableRxAndEnableTx
 #define UDS_LEV_CTRLTP_DRXTX 3  // DisableRxAndTx
+#define UDS_LEV_CTRLTP_ERXDTXWEAI 4 // EnableRxAndDisableTxWithEnhancedAddressInformation
+#define UDS_LEV_CTRLTP_ERXTXWEAI 5 // EnableRxAndTxWithEnhancedAddressInformation
+
+/**
+ * @brief 0x2F InputOutputControlByIdentifier - inputOutputControlParameter
+ * @details ISO 14229-1:2020 Annex E, Table E.1.
+ *          Referenced in Clause 13.2.2.1, Table 399 (Note M1).
+ */
+#define UDS_IOCP_RET_CTRL_TO_ECU   0x00 /*!< returnControlToECU */
+#define UDS_IOCP_RESET_TO_DEFAULT  0x01 /*!< resetToDefault */
+#define UDS_IOCP_FREEZE_CUR_STATE  0x02 /*!< freezeCurrentState */
+#define UDS_IOCP_SHORT_TERM_ADJ    0x03 /*!< shortTermAdjustment */
 
 /**
  * @brief 0x28 Communication Control communicationType
@@ -689,7 +739,7 @@ typedef int UDS_LogLevel_t;
 #define UDS_LOG_SDU(tag, buffer, buff_len, info) UDS_LogSDUDummy(tag, buffer, buff_len, info)
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(UDS_SYS_RTT)
 #define UDS_PRINTF_FORMAT(fmt_index, first_arg)                                                    \
     __attribute__((format(printf, fmt_index, first_arg)))
 #else
@@ -748,6 +798,17 @@ typedef struct UDSClient {
 } UDSClient_t;
 
 /**
+ * @brief Request File Transfer Response structure
+ */
+struct RequestFileTransferResponse {
+    uint8_t modeOfOperation;        /**< Echo of the request mode */
+    size_t maxNumberOfBlockLength;  /**< Max block length allowed by server */
+    uint8_t dataFormatIdentifier;   /**< DFI (Optional) */
+    size_t fileSizeUncompressed;    /**< Uncompressed size (Only for ReadFile/ReadDir) */
+    size_t fileSizeCompressed;      /**< Compressed size (Only for ReadFile/ReadDir) */
+};
+
+/**
  * @brief Security access response structure
  */
 struct SecurityAccessResponse {
@@ -790,6 +851,7 @@ UDSErr_t UDSSendECUReset(UDSClient_t *client, uint8_t type);
 UDSErr_t UDSSendDiagSessCtrl(UDSClient_t *client, uint8_t mode);
 UDSErr_t UDSSendSecurityAccess(UDSClient_t *client, uint8_t level, uint8_t *data, uint16_t size);
 UDSErr_t UDSSendCommCtrl(UDSClient_t *client, uint8_t ctrl, uint8_t comm);
+UDSErr_t UDSSendCommCtrlWithNodeID(UDSClient_t *client, uint8_t ctrl, uint8_t comm, uint16_t nodeId);
 UDSErr_t UDSSendRDBI(UDSClient_t *client, const uint16_t *didList,
                      const uint16_t numDataIdentifiers);
 UDSErr_t UDSSendWDBI(UDSClient_t *client, uint16_t dataIdentifier, const uint8_t *data,
@@ -809,11 +871,14 @@ UDSErr_t UDSSendTransferData(UDSClient_t *client, uint8_t blockSequenceCounter,
                              const uint16_t blockLength, const uint8_t *data, uint16_t size);
 UDSErr_t UDSSendTransferDataStream(UDSClient_t *client, uint8_t blockSequenceCounter,
                                    const uint16_t blockLength, FILE *fd);
-UDSErr_t UDSSendRequestTransferExit(UDSClient_t *client);
+UDSErr_t UDSSendRequestTransferExit(UDSClient_t *client, const uint8_t *data, uint16_t size);
 
 UDSErr_t UDSSendRequestFileTransfer(UDSClient_t *client, uint8_t mode, const char *filePath,
                                     uint8_t dataFormatIdentifier, uint8_t fileSizeParameterLength,
                                     size_t fileSizeUncompressed, size_t fileSizeCompressed);
+
+UDSErr_t UDSSendIOControl(UDSClient_t *client, uint16_t did, uint8_t param, 
+                          const uint8_t *data, uint16_t size);
 
 UDSErr_t UDSCtrlDTCSetting(UDSClient_t *client, uint8_t dtcSettingType,
                            uint8_t *dtcSettingControlOptionRecord, uint16_t len);
@@ -824,6 +889,9 @@ UDSErr_t UDSUnpackRequestDownloadResponse(const UDSClient_t *client,
                                           struct RequestDownloadResponse *resp);
 UDSErr_t UDSUnpackRoutineControlResponse(const UDSClient_t *client,
                                          struct RoutineControlResponse *resp);
+
+UDSErr_t UDSUnpackRequestFileTransferResponse(const UDSClient_t *client,
+                                              struct RequestFileTransferResponse *resp);
 
 UDSErr_t UDSConfigDownload(UDSClient_t *client, uint8_t dataFormatIdentifier,
                            uint8_t addressAndLengthFormatIdentifier, size_t memoryAddress,
@@ -881,6 +949,20 @@ typedef struct UDSServer {
 
     uint8_t sessionType;   /**< diagnostic session type (0x10) */
     uint8_t securityLevel; /**< SecurityAccess (0x27) level */
+
+    /**
+     * @brief CommunicationControl (0x28) active state.
+     * 
+     * Stores the current ControlType (0x00-0x03) for specific message categories.
+     * Default is 0x00 (EnableRxAndTx).
+     * 
+     * @see ISO 14229-1:2020 Annex B.1 Table B.1 (communicationType parameter definition).
+     * The standard separates control into:
+     * - Normal Communication Messages (NCM)
+     * - Network Management Communication Messages (NWMCM)
+     */
+    uint8_t commState_Normal; /**< Active state for NCM (communicationType bit 0), see Table B.1 */
+    uint8_t commState_NM;     /**< Active state for NWMCM (communicationType bit 1), see Table B.1 */
 
     bool RCRRP;             /**< set to true when user fn returns 0x78 and false otherwise */
     bool requestInProgress; /**< set to true when a request has been processed but the response has
@@ -1135,9 +1217,10 @@ typedef struct {
     const uint8_t modeOfOperation;      /*! requested specifier for operation mode */
     const uint16_t filePathLen;         /*! request data length */
     const uint8_t *filePath;            /*! requested file path and name */
-    const uint8_t dataFormatIdentifier; /*! optional specifier for format of data */
-    const size_t fileSizeUnCompressed;  /*! optional file size */
-    const size_t fileSizeCompressed;    /*! optional file size */
+    /* Allow server handler to update these values for ReadFile (0x04) and ReadDir (0x05) responses */
+    uint8_t dataFormatIdentifier;       /*! optional specifier for format of data */
+    size_t fileSizeUnCompressed;        /*! optional file size */
+    size_t fileSizeCompressed;          /*! optional file size */
     uint16_t maxNumberOfBlockLength;    /*! optional response: inform client how many data bytes to
                                            send in each    `TransferData` request */
 } UDSRequestFileTransferArgs_t;

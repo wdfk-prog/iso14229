@@ -1,0 +1,14 @@
+from building import *
+import rtconfig
+
+cwd     = GetCurrentDir()
+
+src     = Glob('*.c')
+path    = [cwd]
+
+if GetDepend('UDS_USING_EXAMPLE'):
+    src += Glob('examples/rtt_uds_example.c')
+
+group = DefineGroup('can_uds', src, depend = ['PKG_USING_ISO14229'], CPPPATH = path)
+
+Return('group')
