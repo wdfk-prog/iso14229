@@ -51,6 +51,16 @@ static struct linenoiseState g_ls;
  */
 static volatile int g_shell_force_exit = 0;
 
+/**
+ * @brief Whether linenoise editor is currently active.
+ * @details This flag synchronizes async terminal output with linenoise lifecycle.
+ *          The 0x2A unsolicited log path may call client_shell_async_write() at
+ *          any time; hide/show must run only while editor is active.
+ *          Without this guard, async logs can corrupt prompt rendering, break
+ *          input echo, or trigger duplicated/stale EditStop state transitions.
+ */
+static volatile int g_shell_editor_active = 0;
+
 /** @brief Current remote working directory for the prompt. */
 static char g_remote_path[128] = "/";
 
@@ -67,6 +77,7 @@ static void client_on_disconnect(void)
 {
     /* 1. Stop Line Editing (Restore terminal to cooked mode) */
     linenoiseEditStop(&g_ls);
+    g_shell_editor_active = 0;
     
     /* 2. Signal the main loop to break */
     g_shell_force_exit = 1;
@@ -98,6 +109,31 @@ void client_shell_set_path(const char *path)
 const char* client_shell_get_path(void) 
 {
     return g_remote_path;
+}
+
+/**
+ * @brief Writes asynchronous output without breaking interactive prompt state.
+ * @details Typical caller is the 0x2A unsolicited log stream. We gate
+ *          linenoiseHide()/linenoiseShow() with g_shell_editor_active instead
+ *          of calling them unconditionally so this function is safe in:
+ *          1) active editing, 2) editor already stopped, 3) editor not started yet.
+ */
+void client_shell_async_write(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len == 0) {
+        return;
+    }
+
+    if (g_shell_editor_active) {
+        linenoiseHide(&g_ls);
+    }
+
+    (void)fwrite(data, 1, len, stdout);
+    fflush(stdout);
+
+    if (g_shell_editor_active) {
+        linenoiseShow(&g_ls);
+    }
 }
 
 /* --- Command Wrappers --- */
@@ -241,6 +277,8 @@ int client_shell_loop(void)
     /* Initial Prompt */
     snprintf(prompt, sizeof(prompt), "msh %s> ", g_remote_path);
     linenoiseEditStart(&g_ls, STDIN_FILENO, STDOUT_FILENO, buf, sizeof(buf), prompt);
+    /* Async write synchronization: start -> active. */
+    g_shell_editor_active = 1;
 
     /* --- Event Loop --- */
     while (1) {
@@ -273,6 +311,8 @@ int client_shell_loop(void)
             else if (line != NULL) {
                 /* Complete line received */
                 linenoiseEditStop(&g_ls); /* Restore terminal */
+                /* Async write synchronization: stop -> inactive. */
+                g_shell_editor_active = 0;
                 
                 if (strlen(line) > 0) {
                     linenoiseHistoryAdd(line);
@@ -312,11 +352,15 @@ int client_shell_loop(void)
                 /* Re-enable Prompt */
                 snprintf(prompt, sizeof(prompt), "msh %s> ", g_remote_path);
                 linenoiseEditStart(&g_ls, STDIN_FILENO, STDOUT_FILENO, buf, sizeof(buf), prompt);
+                /* Async write synchronization: start -> active. */
+                g_shell_editor_active = 1;
             } 
             else { 
                 /* Error: Ctrl+C (EAGAIN) or Ctrl+D (ENOENT) */
                 if (errno == EAGAIN || errno == ENOENT) {
                     linenoiseEditStop(&g_ls);
+                    /* Async write synchronization: stop -> inactive. */
+                    g_shell_editor_active = 0;
                     printf("\nQuit\n");
                     exit_code = SHELL_EXIT_USER;
                     break;
@@ -341,6 +385,10 @@ int client_shell_loop(void)
         }
     }
     
-    linenoiseEditStop(&g_ls);
+    if (g_shell_editor_active) {
+        linenoiseEditStop(&g_ls);
+        /* Async write synchronization: stop -> inactive. */
+        g_shell_editor_active = 0;
+    }
     return exit_code;
 }

@@ -54,6 +54,9 @@ static volatile int g_heartbeat_fail_count = 0;
 /** @brief Registered callback for handling fatal disconnection events. */
 static uds_disconnect_callback_t g_disconnect_cb = NULL;
 
+/** @brief Registered callback for unsolicited payload events. */
+static uds_unsolicited_payload_callback_t g_unsolicited_cb = NULL;
+
 /** @brief Original transport poll function pointer (saved for hooking). */
 static UDSTpStatus_t (*original_tp_poll)(struct UDSTp *hdl) = NULL;
 
@@ -135,6 +138,12 @@ static UDSErr_t client_event_handler(UDSClient_t *client, UDSEvent_t evt, void *
             g_response_received = true; /* Unblock waiting threads */
             break;
 
+        case UDS_EVT_UnsolicitedPayloadReceived:
+            if (g_unsolicited_cb && ev_data) {
+                g_unsolicited_cb((const UDSClientPayloadArgs_t *)ev_data);
+            }
+            break;
+
         default:
             break;
     }
@@ -158,6 +167,11 @@ uint8_t uds_get_last_nrc(void)
 void uds_register_disconnect_callback(uds_disconnect_callback_t cb) 
 {
     g_disconnect_cb = cb;
+}
+
+void uds_register_unsolicited_payload_callback(uds_unsolicited_payload_callback_t cb)
+{
+    g_unsolicited_cb = cb;
 }
 
 void uds_poll(void) 

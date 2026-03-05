@@ -22,6 +22,9 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
+#include <stdint.h>
+
 /* ==========================================================================
  * Shell Exit Codes
  * ========================================================================== */
@@ -78,6 +81,15 @@ void client_shell_set_path(const char *path);
  * @return const char* Pointer to the internal path string.
  */
 const char* client_shell_get_path(void);
+
+/**
+ * @brief Writes asynchronous text to the terminal without breaking prompt state.
+ * @details Hides the active prompt line, writes the payload, and restores prompt.
+ *
+ * @param data Pointer to bytes to write.
+ * @param len  Number of bytes in @p data.
+ */
+void client_shell_async_write(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

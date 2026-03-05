@@ -94,6 +94,7 @@ int main(int argc, char **argv)
     client_file_svc_init();     /* File Transfer (0x34/35/36/37/38) */
     client_0x28_init();         /* Communication Control */
     client_0x11_init();         /* ECU Reset */
+    client_0x2A_init();         /* 0x2A Periodic ULOG Stream */
 
     /* --- 3. Main Application Loop (Reconnection Logic) --- */
     do {
@@ -147,6 +148,11 @@ int main(int argc, char **argv)
              * This populates the autocomplete cache.
              */
             client_sync_remote_commands();
+
+            /* Auto-enable 0x2A ulog stream (best effort). */
+            if (client_0x2A_ulog_auto_start() != 0) {
+                LOG_WARN("Auto-enable 0x2A ULOG failed, continue without stream.");
+            }
         }
 
         /* C. Interactive Shell Execution */
@@ -161,6 +167,9 @@ int main(int argc, char **argv)
         shell_exit_code = client_shell_loop();
 
         /* D. Cleanup Context */
+        if (client_0x2A_ulog_auto_stop() != 0) {
+            LOG_WARN("Auto-disable 0x2A ULOG failed during cleanup.");
+        }
         uds_context_deinit();
 
         /* E. Post-Mortem Analysis */

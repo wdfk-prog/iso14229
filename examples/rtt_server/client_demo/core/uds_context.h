@@ -39,6 +39,13 @@ extern "C" {
  */
 typedef void (*uds_disconnect_callback_t)(void);
 
+/**
+ * @brief Callback type for unsolicited payload events.
+ * @details Invoked when the transport receives payload that does not match
+ *          an in-flight request/response transaction.
+ */
+typedef void (*uds_unsolicited_payload_callback_t)(const UDSClientPayloadArgs_t *args);
+
 /* ==========================================================================
  * Public API - Instance Access
  * ========================================================================== */
@@ -85,6 +92,12 @@ void uds_context_deinit(void);
  * @param cb The function pointer to call when the connection is considered lost.
  */
 void uds_register_disconnect_callback(uds_disconnect_callback_t cb);
+
+/**
+ * @brief Registers a callback for unsolicited payload events.
+ * @param cb Callback invoked on UDS_EVT_UnsolicitedPayloadReceived.
+ */
+void uds_register_unsolicited_payload_callback(uds_unsolicited_payload_callback_t cb);
 
 /* ==========================================================================
  * Public API - Transaction Helpers
