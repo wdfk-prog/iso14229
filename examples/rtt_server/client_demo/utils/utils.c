@@ -17,9 +17,7 @@
  * 2025-12-02 1.0     wdfk-prog   first version
  */
 #include "utils.h"
-#include <sys/time.h>
-#include <unistd.h>
-#include <time.h>
+#include "platform.h"
 #include <stdio.h>
 
 /* ==========================================================================
@@ -36,25 +34,13 @@
 /**
  * @brief Retrieves the current system monotonic time in milliseconds.
  * 
- * @details This function uses `gettimeofday` to acquire the system time with 
- *          microsecond resolution and downsamples it to milliseconds.
- *          @note This relies on the system clock. If the system clock changes 
- *          discontinuously (e.g., NTP update), the return value may jump.
+ * @details This function delegates to the platform abstraction layer.
  * 
  * @return uint32_t The current timestamp in milliseconds.
  */
 uint32_t sys_tick_get_ms(void) 
 {
-    struct timeval tv;
-    
-    /* 
-     * Retrieve current time. 
-     * NULL is passed as the second argument because timezone information is not required.
-     */
-    gettimeofday(&tv, NULL);
-
-    /* Convert seconds and microseconds to total milliseconds */
-    return (uint32_t)((tv.tv_sec * 1000) + (tv.tv_usec / 1000));
+    return platform_tick_ms();
 }
 
 /**
@@ -64,11 +50,7 @@ uint32_t sys_tick_get_ms(void)
  */
 void sys_delay_ms(uint32_t ms) 
 {
-    /* 
-     * usleep accepts duration in microseconds.
-     * Conversion: 1 ms = 1000 us.
-     */
-    usleep(ms * 1000);
+    platform_sleep_ms(ms);
 }
 
 /**
@@ -187,5 +169,5 @@ void utils_render_progress(size_t current, size_t total, const char *label)
     }
 
     /* Force stdout flush to update the terminal immediately */
-    fflush(stdout);
+    platform_console_flush_stdout();
 }

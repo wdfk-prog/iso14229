@@ -21,13 +21,13 @@
 #include "uds_context.h"      /* For uds_register_disconnect_callback, uds_poll, etc. */
 #include "client_config.h"    /* For CLIENT_HEARTBEAT_MS */
 #include "client.h"           /* For client_console_get_... accessors */
+#include "platform.h"
 #include "../utils/linenoise.h"
 #include "../utils/utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/select.h>
 #include <errno.h>
 
 /* ==========================================================================
@@ -36,7 +36,7 @@
 
 #define HISTORY_FILE            ".uds_history"
 #define MAX_HEARTBEAT_RETRIES   3
-#define POLL_INTERVAL_US        20000 /* 20ms polling interval */
+#define POLL_INTERVAL_MS        20 /* 20ms polling interval */
 
 /**
  * @brief Global Linenoise State.
@@ -129,7 +129,7 @@ void client_shell_async_write(const uint8_t *data, size_t len)
     }
 
     (void)fwrite(data, 1, len, stdout);
-    fflush(stdout);
+    platform_console_flush_stdout();
 
     if (g_shell_editor_active) {
         linenoiseShow(&g_ls);
@@ -290,19 +290,11 @@ int client_shell_loop(void)
             break;
         }
 
-        /* 2. Prepare Select */
-        fd_set readfds;
-        struct timeval tv;
-        FD_ZERO(&readfds);
-        FD_SET(STDIN_FILENO, &readfds);
-        
-        tv.tv_sec = 0;
-        tv.tv_usec = POLL_INTERVAL_US; 
-
-        int ret = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+        /* 2. Poll input readiness */
+        int ret = platform_console_poll_input(POLL_INTERVAL_MS);
 
         /* 3. Handle Input */
-        if (ret > 0 && FD_ISSET(STDIN_FILENO, &readfds)) {
+        if (ret > 0) {
             line = linenoiseEditFeed(&g_ls);
             
             if (line == linenoiseEditMore) {

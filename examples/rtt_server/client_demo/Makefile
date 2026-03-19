@@ -57,8 +57,11 @@ TARGET = client
 # Directories to scan for source files
 SRC_DIRS = . core services utils
 
+# Explicit platform implementation selection (Linux only for current task scope)
+PLATFORM_SRCS = platform/platform_linux.c
+
 # Automatically find all .c files in the specified directories
-CLIENT_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
+CLIENT_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c)) $(PLATFORM_SRCS)
 
 # External UDS Core Library Configuration
 UDS_LIB_DIR = ..
@@ -74,7 +77,7 @@ LDFLAGS  = $(SDK_LDFLAGS)
 
 # --- Include Paths ---
 # Add all source directories and the parent lib directory to include path
-CFLAGS  += -I. -Icore -Iservices -Iutils -I$(UDS_LIB_DIR)
+CFLAGS  += -I. -Icore -Iservices -Iutils -Iplatform -I$(UDS_LIB_DIR)
 
 # --- Optimization Flags ---
 # ISO-TP Flow Control: Disable block separation for maximum throughput
