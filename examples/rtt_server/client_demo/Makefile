@@ -73,11 +73,12 @@ UDS_LIB_SRC = $(UDS_LIB_DIR)/iso14229.c
 
 # Base flags from SDK
 CFLAGS   = $(SDK_CFLAGS)
+CPPFLAGS ?=
 LDFLAGS  = $(SDK_LDFLAGS)
 
 # --- Include Paths ---
 # Add all source directories and the parent lib directory to include path
-CFLAGS  += -I. -Icore -Iservices -Iutils -Iplatform -I$(UDS_LIB_DIR)
+CPPFLAGS += -I. -Icore -Iservices -Iutils -Iplatform -Itransport -I$(UDS_LIB_DIR)
 
 # --- Optimization Flags ---
 # ISO-TP Flow Control: Disable block separation for maximum throughput
@@ -135,14 +136,14 @@ $(TARGET): $(OBJS)
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "==> Compiling Local: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # Compilation Rule: External UDS Library
 # Special rule for the file located in the parent directory
 $(LIB_OBJ): $(UDS_LIB_SRC)
 	@mkdir -p $(dir $@)
 	@echo "==> Compiling Lib:   $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # Phony Targets (Actions, not files)
 .PHONY: all clean
