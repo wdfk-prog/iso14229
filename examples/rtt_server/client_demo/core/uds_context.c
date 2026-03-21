@@ -21,10 +21,11 @@
 #include "uds_context.h"
 #include "response_registry.h"
 #include "client_config.h"
+#include "../transport/transport.h"
 #include "../utils/utils.h"
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
+#include <stddef.h>
 
 /* ==========================================================================
  * Configuration Macros
@@ -39,8 +40,14 @@
 /** @brief Internal UDS Client instance. */
 static UDSClient_t g_client;
 
-/** @brief Internal ISO-TP SocketCAN transport instance. */
-static UDSTpIsoTpSock_t g_tp;
+/** @brief Internal transport abstraction instance. */
+static uds_transport_t g_transport;
+/** @brief Static raw storage bound to transport backend context. */
+typedef union {
+    max_align_t _align;
+    unsigned char bytes[UDS_TRANSPORT_STORAGE_CAPACITY];
+} uds_transport_storage_t;
+static uds_transport_storage_t g_transport_storage;
 
 /** @brief Flag indicating a transaction (Send/Recv) has completed. */
 static volatile bool g_response_received = false;
@@ -56,9 +63,6 @@ static uds_disconnect_callback_t g_disconnect_cb = NULL;
 
 /** @brief Registered callback for unsolicited payload events. */
 static uds_unsolicited_payload_callback_t g_unsolicited_cb = NULL;
-
-/** @brief Original transport poll function pointer (saved for hooking). */
-static UDSTpStatus_t (*original_tp_poll)(struct UDSTp *hdl) = NULL;
 
 /* ==========================================================================
  * Internal Helpers & Hooks
@@ -76,29 +80,34 @@ static void trigger_disconnect_logic(void)
 }
 
 /**
- * @brief Intercepts the transport layer's poll function.
- * @details Wraps the low-level `isotp_sock_tp_poll` to capture asynchronous 
- *          socket errors (e.g., ECOMM) that might otherwise be swallowed.
- *          Increments the failure counter and triggers disconnect logic if needed.
- * 
- * @param hdl Transport handle.
- * @return UDSTpStatus_t Status from the original poll function.
+ * @brief Handles asynchronous transport error callbacks.
+ * @details Applies heartbeat-failure policy for normalized async transport
+ *          errors. POLL/IO increment failures; DISCONNECTED forces immediate disconnect threshold.
+ *
+ * @param user User data pointer (unused).
+ * @param err  Transport error code.
  */
-static UDSTpStatus_t intercepted_tp_poll(struct UDSTp *hdl) 
+static void on_transport_error(void *user, uds_transport_async_error_t err)
 {
-    /* Call the real poll function */
-    UDSTpStatus_t status = original_tp_poll(hdl);
+    (void)user;
 
-    /* Check for transport errors (bit 2) */
-    if (status & UDS_TP_ERR) {
-        g_heartbeat_fail_count++;
-        
-        /* Immediate threshold check */
-        if (g_heartbeat_fail_count >= MAX_HEARTBEAT_RETRIES) {
-            trigger_disconnect_logic();
-        }
+    switch (err) {
+        case UDS_TRANSPORT_ASYNC_ERR_POLL:
+        case UDS_TRANSPORT_ASYNC_ERR_IO:
+            g_heartbeat_fail_count++;
+            break;
+
+        case UDS_TRANSPORT_ASYNC_ERR_DISCONNECTED:
+            g_heartbeat_fail_count = MAX_HEARTBEAT_RETRIES;
+            break;
+
+        default:
+            return;
     }
-    return status;
+
+    if (g_heartbeat_fail_count >= MAX_HEARTBEAT_RETRIES) {
+        trigger_disconnect_logic();
+    }
 }
 
 /**
@@ -186,37 +195,56 @@ void uds_poll(void)
 int uds_context_init(void) 
 {
     UDSErr_t err;
+    uds_transport_open_cfg_t open_cfg = {0};
+    uds_transport_socketcan_cfg_t socketcan_cfg = {0};
 
     /* 1. Reset state */
-    memset(&g_tp, 0, sizeof(g_tp));
-    g_tp.phys_fd = -1;
-    g_tp.func_fd = -1;
+    uds_transport_close(&g_transport);
+    uds_transport_init(&g_transport);
     memset(&g_client, 0, sizeof(g_client));
     g_heartbeat_fail_count = 0;
 
-    /* 2. Initialize Transport (SocketCAN) */
-    err = UDSTpIsoTpSockInitClient(&g_tp, 
-                                   g_uds_cfg.if_name, 
-                                   g_uds_cfg.phys_sa, 
-                                   g_uds_cfg.phys_ta, 
-                                   g_uds_cfg.func_sa);
-    if (err != UDS_OK) {
-        LOG_ERROR("Failed to init SocketCAN on %s", g_uds_cfg.if_name);
+    if (uds_transport_bind_storage(&g_transport, g_transport_storage.bytes, sizeof(g_transport_storage.bytes)) != 0) {
+        LOG_ERROR("Failed to bind transport storage");
+        g_client.tp = NULL;
+        g_client.fn = NULL;
         return -1;
     }
 
-    /* 3. Install Hook */
-    original_tp_poll = g_tp.hdl.poll;
-    g_tp.hdl.poll = intercepted_tp_poll;
+    socketcan_cfg.if_name = g_uds_cfg.if_name;
+    open_cfg.backend = UDS_TRANSPORT_BACKEND_SOCKETCAN;
+    open_cfg.phys_sa = g_uds_cfg.phys_sa;
+    open_cfg.phys_ta = g_uds_cfg.phys_ta;
+    open_cfg.func_sa = g_uds_cfg.func_sa;
+    open_cfg.backend_cfg = &socketcan_cfg;
 
-    /* 4. Initialize Client */
+    /* 2. Initialize Transport Backend */
+    if (uds_transport_open(&g_transport, &open_cfg) != 0) {
+        LOG_ERROR("Failed to init SocketCAN on %s", g_uds_cfg.if_name);
+        uds_transport_close(&g_transport);
+        g_client.tp = NULL;
+        g_client.fn = NULL;
+        return -1;
+    }
+    uds_transport_set_error_callback(&g_transport, on_transport_error, NULL);
+
+    /* 3. Initialize Client */
     err = UDSClientInit(&g_client);
     if (err != UDS_OK) {
+        uds_transport_close(&g_transport);
+        g_client.tp = NULL;
+        g_client.fn = NULL;
         return -1;
     }
 
-    /* 5. Link Dependencies */
-    g_client.tp = (UDSTp_t *)&g_tp;
+    /* 4. Link Dependencies */
+    g_client.tp = uds_transport_get_tp_handle(&g_transport);
+    if (g_client.tp == NULL) {
+        uds_transport_close(&g_transport);
+        g_client.tp = NULL;
+        g_client.fn = NULL;
+        return -1;
+    }
     g_client.fn = client_event_handler;
 
     LOG_INFO("UDS Context Initialized (IF: %s)", g_uds_cfg.if_name);
@@ -225,19 +253,11 @@ int uds_context_init(void)
 
 void uds_context_deinit(void) 
 {
-    if (g_tp.phys_fd >= 0) {
-        UDSTpIsoTpSockDeinit(&g_tp);
-    }
-    
-    if (g_tp.phys_fd >= 0) { 
-        close(g_tp.phys_fd); 
-        g_tp.phys_fd = -1; 
-    }
-    if (g_tp.func_fd >= 0) { 
-        close(g_tp.func_fd); 
-        g_tp.func_fd = -1; 
-    }
-    
+    uds_transport_close(&g_transport);
+
+    g_client.tp = NULL;
+    g_client.fn = NULL;
+
     LOG_INFO("UDS Context Deinitialized");
 }
 

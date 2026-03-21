@@ -74,16 +74,16 @@ uint8_t uds_get_last_nrc(void);
 
 /**
  * @brief Initializes the UDS Context.
- * @details Sets up the SocketCAN interface, initializes the ISO-TP transport layer,
- *          and configures the UDS client. Must be called before any other API.
+ * @details Initializes the configured transport backend, then configures the
+ *          UDS client instance. Must be called before any other API.
  *
- * @return int 0 on success, -1 on failure (e.g., socket creation error).
+ * @return int 0 on success, -1 on failure.
  */
 int uds_context_init(void);
 
 /**
  * @brief Cleans up UDS Context resources.
- * @details Closes open sockets, releases file descriptors, and resets internal state.
+ * @details Closes transport backend resources and resets internal state.
  */
 void uds_context_deinit(void);
 

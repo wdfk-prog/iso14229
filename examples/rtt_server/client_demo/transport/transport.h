@@ -2,9 +2,9 @@
  * @file transport.h
  * @brief Minimal transport abstraction for multi-backend UDS client support.
  *
- * This header defines a small, C-friendly abstraction boundary so `uds_context`
- * can later switch between Linux SocketCAN and Windows TSMaster backends without
- * changing upper-layer command/service logic.
+ * This header defines a compact transport boundary so `uds_context` can switch
+ * between Linux SocketCAN and future Windows TSMaster backends while keeping
+ * upper-layer UDS command/service code stable.
  */
 #ifndef TRANSPORT_H
 #define TRANSPORT_H
@@ -19,6 +19,9 @@ extern "C" {
 
 #include "iso14229.h"
 
+/* Conservative static storage budget for large ISO-TP socket context. */
+#define UDS_TRANSPORT_STORAGE_CAPACITY ((UDS_ISOTP_MTU * 2U) + 1024U)
+
 /**
  * @brief Backend selector for transport implementations.
  */
@@ -28,9 +31,20 @@ typedef enum {
 } uds_transport_backend_t;
 
 /**
- * @brief Common transport open arguments used by upper layers.
- * @details `backend_cfg` is backend-private opaque data, so this struct does
- *          not leak SocketCAN/TSMaster-specific fields to all callers.
+ * @brief Transport asynchronous error category (backend-layer semantics).
+ */
+typedef enum {
+    UDS_TRANSPORT_ASYNC_ERR_POLL = 1,
+    UDS_TRANSPORT_ASYNC_ERR_IO,
+    UDS_TRANSPORT_ASYNC_ERR_DISCONNECTED,
+} uds_transport_async_error_t;
+
+/**
+ * @brief Common open arguments for all transport backends.
+ * @details Backend-private parameters are passed via @p backend_cfg.
+ *          `backend_cfg` is valid only during `uds_transport_open()` call;
+ *          backend implementation must copy required fields and must not store
+ *          the caller-provided pointer directly.
  */
 typedef struct {
     uds_transport_backend_t backend;
@@ -40,15 +54,30 @@ typedef struct {
     const void *backend_cfg;
 } uds_transport_open_cfg_t;
 
-/** Opaque transport object. */
+/**
+ * @brief SocketCAN backend-specific open configuration.
+ */
+typedef struct {
+    const char *if_name;
+} uds_transport_socketcan_cfg_t;
+
+/**
+ * @brief Transport-layer asynchronous error callback.
+ * @param user User data pointer registered by caller.
+ * @param err  Transport-layer normalized async error category.
+ * @note Backends may report persistent async faults repeatedly; upper layers
+ *       should define counting and reset policy explicitly.
+ */
+typedef void (*uds_transport_error_callback_t)(void *user, uds_transport_async_error_t err);
+
+/** Transport object handle used by upper layers. */
 typedef struct uds_transport uds_transport_t;
 
 /**
  * @brief Backend operation table.
- * @details Keep this set minimal: lifecycle, send/poll, timeout and error.
  */
 typedef struct {
-    int (*open)(uds_transport_t *tp, const void *cfg);
+    int (*open)(uds_transport_t *tp, const uds_transport_open_cfg_t *cfg);
     void (*close)(uds_transport_t *tp);
     int (*send)(uds_transport_t *tp, const uint8_t *data, size_t len, bool functional);
     int (*poll)(uds_transport_t *tp);
@@ -58,76 +87,63 @@ typedef struct {
 } uds_transport_ops_t;
 
 /**
- * @brief Transport instance container.
- * @details `backend_ctx` is owned by backend implementation.
+ * @brief Public transport instance used by upper layers.
+ * @details Backend implementation owns and interprets @p backend_ctx.
  */
 struct uds_transport {
     const uds_transport_ops_t *ops;
     void *backend_ctx;
     int last_error;
     uint32_t timeout_ms;
+    uds_transport_error_callback_t err_cb;
+    void *err_user;
+
+    /* Caller-provided raw storage used by backend context allocation. */
+    void *bound_storage;
+    size_t bound_storage_size;
 };
 
-/* ---------- Thin dispatch helpers (no behavior change by themselves) ---------- */
+/**
+ * @brief Initialize transport object to a clean closed state.
+ */
+void uds_transport_init(uds_transport_t *tp);
 
-static inline int uds_transport_open(uds_transport_t *tp, const void *cfg)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->open == NULL) {
-        return -1;
-    }
-    return tp->ops->open(tp, cfg);
-}
+/**
+ * @brief Bind caller-provided raw storage used by backend context.
+ * @return 0 on success, -1 on failure.
+ */
+int uds_transport_bind_storage(uds_transport_t *tp, void *storage, size_t size);
 
-static inline void uds_transport_close(uds_transport_t *tp)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->close == NULL) {
-        return;
-    }
-    tp->ops->close(tp);
-}
+/**
+ * @brief Open transport with backend selected by @p cfg.
+ * @return 0 on success, -1 on failure.
+ * @note Caller must initialize @p tp via uds_transport_init() and bind storage
+ *       via uds_transport_bind_storage() before first open.
+ * @note On failure, this function rolls @p tp back to a clean closed state.
+ */
+int uds_transport_open(uds_transport_t *tp, const uds_transport_open_cfg_t *cfg);
 
-static inline int uds_transport_send(uds_transport_t *tp,
-                                     const uint8_t *data,
-                                     size_t len,
-                                     bool functional)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->send == NULL) {
-        return -1;
-    }
-    return tp->ops->send(tp, data, len, functional);
-}
+/**
+ * @brief Close transport and reset runtime state.
+ */
+void uds_transport_close(uds_transport_t *tp);
 
-static inline int uds_transport_poll(uds_transport_t *tp)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->poll == NULL) {
-        return -1;
-    }
-    return tp->ops->poll(tp);
-}
+int uds_transport_send(uds_transport_t *tp,
+                       const uint8_t *data,
+                       size_t len,
+                       bool functional);
 
-static inline void uds_transport_set_timeout(uds_transport_t *tp, uint32_t timeout_ms)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->set_timeout == NULL) {
-        return;
-    }
-    tp->ops->set_timeout(tp, timeout_ms);
-}
+int uds_transport_poll(uds_transport_t *tp);
 
-static inline int uds_transport_get_last_error(uds_transport_t *tp)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->get_last_error == NULL) {
-        return -1;
-    }
-    return tp->ops->get_last_error(tp);
-}
+void uds_transport_set_timeout(uds_transport_t *tp, uint32_t timeout_ms);
 
-static inline UDSTp_t *uds_transport_get_tp_handle(uds_transport_t *tp)
-{
-    if (tp == NULL || tp->ops == NULL || tp->ops->get_tp_handle == NULL) {
-        return NULL;
-    }
-    return tp->ops->get_tp_handle(tp);
-}
+int uds_transport_get_last_error(uds_transport_t *tp);
+
+UDSTp_t *uds_transport_get_tp_handle(uds_transport_t *tp);
+
+void uds_transport_set_error_callback(uds_transport_t *tp,
+                                      uds_transport_error_callback_t cb,
+                                      void *user);
 
 #ifdef __cplusplus
 }

@@ -59,9 +59,13 @@ SRC_DIRS = . core services utils
 
 # Explicit platform implementation selection (Linux only for current task scope)
 PLATFORM_SRCS = platform/platform_linux.c
+TRANSPORT_SRCS = transport/transport.c \
+                 transport/transport_socketcan.c
 
 # Automatically find all .c files in the specified directories
-CLIENT_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c)) $(PLATFORM_SRCS)
+CLIENT_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c)) \
+              $(PLATFORM_SRCS) \
+              $(TRANSPORT_SRCS)
 
 # External UDS Core Library Configuration
 UDS_LIB_DIR = ..
@@ -87,6 +91,7 @@ CFLAGS  += -DISOTP_FC_STMIN=0
 
 # --- Feature Flags ---
 CFLAGS  += -DUDS_TP_ISOTP_SOCK      # Use SocketCAN transport
+CFLAGS  += -DUDS_TRANSPORT_ENABLE_SOCKETCAN  # Enable SocketCAN backend in transport dispatch
 CFLAGS  += -DUDS_LINES              # Enable line tracing/debugging
 
 # --- Logging Configuration ---
