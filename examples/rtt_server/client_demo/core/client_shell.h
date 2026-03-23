@@ -55,7 +55,7 @@ void client_shell_init(void);
 /**
  * @brief Enters the main interactive loop.
  * @details This function blocks until the shell session ends. It handles:
- *          - Non-blocking user input (via select).
+ *          - Non-blocking user input polling via platform abstraction.
  *          - Dispatching commands to the registry or remote console.
  *          - Polling the UDS stack.
  *          - Managing heartbeat keep-alive messages.

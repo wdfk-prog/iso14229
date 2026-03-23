@@ -11,6 +11,12 @@ extern "C" {
 
 #include <stdint.h>
 
+typedef enum {
+    PLATFORM_SHELL_INPUT_ACTION_CONTINUE = 0,
+    PLATFORM_SHELL_INPUT_ACTION_USER_EXIT = 1,
+    PLATFORM_SHELL_INPUT_ACTION_IO_ERROR = 2,
+} platform_shell_input_action_t;
+
 /**
  * @brief Return a monotonic timestamp in milliseconds.
  */
@@ -36,6 +42,21 @@ int platform_console_poll_input(uint32_t timeout_ms);
  * @return 1 when one character is read, 0 on EOF, -1 on error.
  */
 int platform_console_read_char(char *ch);
+
+/**
+ * @brief Get stdin file descriptor used by console backend.
+ */
+int platform_console_stdin_fd(void);
+
+/**
+ * @brief Get stdout file descriptor used by console backend.
+ */
+int platform_console_stdout_fd(void);
+
+/**
+ * @brief Classify last shell input error into continue/user-exit/io-error actions and optionally return errno snapshot.
+ */
+platform_shell_input_action_t platform_shell_input_classify_last_error(int *err_out);
 
 /**
  * @brief Flush stdout immediately.

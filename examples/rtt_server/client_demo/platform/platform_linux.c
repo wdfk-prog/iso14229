@@ -46,7 +46,7 @@ int platform_console_poll_input(uint32_t timeout_ms)
 {
     fd_set readfds;
     struct timeval tv;
-    int fd = STDIN_FILENO;
+    int fd = platform_console_stdin_fd();
     int ret;
 
     FD_ZERO(&readfds);
@@ -77,7 +77,7 @@ int platform_console_read_char(char *ch)
         return -1;
     }
 
-    n = read(STDIN_FILENO, ch, 1);
+    n = read(platform_console_stdin_fd(), ch, 1);
     if (n > 0) {
         return 1;
     }
@@ -86,6 +86,35 @@ int platform_console_read_char(char *ch)
     }
 
     return -1;
+}
+
+int platform_console_stdin_fd(void)
+{
+    return STDIN_FILENO;
+}
+
+int platform_console_stdout_fd(void)
+{
+    return STDOUT_FILENO;
+}
+
+
+platform_shell_input_action_t platform_shell_input_classify_last_error(int *err_out)
+{
+    int err = errno;
+
+    if (err_out != NULL) {
+        *err_out = err;
+    }
+
+    if (err == EAGAIN || err == ENOENT) {
+        return PLATFORM_SHELL_INPUT_ACTION_USER_EXIT;
+    }
+    if (err == EINTR) {
+        return PLATFORM_SHELL_INPUT_ACTION_CONTINUE;
+    }
+    /* Unknown/unspecified errno (including 0) is treated as an I/O failure. */
+    return PLATFORM_SHELL_INPUT_ACTION_IO_ERROR;
 }
 
 void platform_console_flush_stdout(void)

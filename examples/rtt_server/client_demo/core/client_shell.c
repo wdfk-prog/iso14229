@@ -27,7 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <stdbool.h>
 #include <errno.h>
 
 /* ==========================================================================
@@ -64,6 +64,8 @@ static volatile int g_shell_editor_active = 0;
 /** @brief Current remote working directory for the prompt. */
 static char g_remote_path[128] = "/";
 
+static void shell_editor_stop(bool force_stop);
+
 /* ==========================================================================
  * Callbacks & Helpers
  * ========================================================================== */
@@ -75,11 +77,9 @@ static char g_remote_path[128] = "/";
  */
 static void client_on_disconnect(void) 
 {
-    /* 1. Stop Line Editing (Restore terminal to cooked mode) */
-    linenoiseEditStop(&g_ls);
-    g_shell_editor_active = 0;
-    
-    /* 2. Signal the main loop to break */
+    shell_editor_stop(false);
+
+    /* Signal the main loop to break. */
     g_shell_force_exit = 1;
 }
 
@@ -109,6 +109,36 @@ void client_shell_set_path(const char *path)
 const char* client_shell_get_path(void) 
 {
     return g_remote_path;
+}
+
+static void shell_editor_stop(bool force_stop)
+{
+    if (force_stop || g_shell_editor_active) {
+        /*
+         * linenoiseEditStop() currently emits a newline.
+         * Keep stop behavior centralized here so future UX policy changes
+         * do not require touching all shell control paths.
+         */
+        linenoiseEditStop(&g_ls);
+    }
+
+    g_shell_editor_active = 0;
+}
+
+static int shell_editor_start(char *buf, size_t buf_len, const char *prompt)
+{
+    if (linenoiseEditStart(&g_ls,
+                           platform_console_stdin_fd(),
+                           platform_console_stdout_fd(),
+                           buf,
+                           buf_len,
+                           prompt) != 0) {
+        shell_editor_stop(true); /* Conservative cleanup for partial start failures. */
+        return -1;
+    }
+
+    g_shell_editor_active = 1;
+    return 0;
 }
 
 /**
@@ -274,11 +304,12 @@ int client_shell_loop(void)
 
     printf("\n[Shell] Interactive Mode Started. Type 'help' or 'exit'.\n");
 
-    /* Initial Prompt */
+    /* Initial prompt. */
     snprintf(prompt, sizeof(prompt), "msh %s> ", g_remote_path);
-    linenoiseEditStart(&g_ls, STDIN_FILENO, STDOUT_FILENO, buf, sizeof(buf), prompt);
-    /* Async write synchronization: start -> active. */
-    g_shell_editor_active = 1;
+    if (shell_editor_start(buf, sizeof(buf), prompt) != 0) {
+        LOG_ERROR("Failed to start line editor");
+        return SHELL_EXIT_USER;
+    }
 
     /* --- Event Loop --- */
     while (1) {
@@ -293,6 +324,18 @@ int client_shell_loop(void)
         /* 2. Poll input readiness */
         int ret = platform_console_poll_input(POLL_INTERVAL_MS);
 
+        if (ret < 0) {
+            int err = errno;
+
+            if (err == EINTR) {
+                continue;
+            }
+
+            LOG_ERROR("platform_console_poll_input failed: %d", err);
+            exit_code = SHELL_EXIT_USER;
+            break;
+        }
+
         /* 3. Handle Input */
         if (ret > 0) {
             line = linenoiseEditFeed(&g_ls);
@@ -302,9 +345,7 @@ int client_shell_loop(void)
             } 
             else if (line != NULL) {
                 /* Complete line received */
-                linenoiseEditStop(&g_ls); /* Restore terminal */
-                /* Async write synchronization: stop -> inactive. */
-                g_shell_editor_active = 0;
+                shell_editor_stop(false); /* Restore terminal. */
                 
                 if (strlen(line) > 0) {
                     linenoiseHistoryAdd(line);
@@ -341,21 +382,28 @@ int client_shell_loop(void)
                 /* Reset heartbeat timer on user activity */
                 last_heartbeat_ts = sys_tick_get_ms();
 
-                /* Re-enable Prompt */
+                /* Re-enable prompt. */
                 snprintf(prompt, sizeof(prompt), "msh %s> ", g_remote_path);
-                linenoiseEditStart(&g_ls, STDIN_FILENO, STDOUT_FILENO, buf, sizeof(buf), prompt);
-                /* Async write synchronization: start -> active. */
-                g_shell_editor_active = 1;
-            } 
-            else { 
-                /* Error: Ctrl+C (EAGAIN) or Ctrl+D (ENOENT) */
-                if (errno == EAGAIN || errno == ENOENT) {
-                    linenoiseEditStop(&g_ls);
-                    /* Async write synchronization: stop -> inactive. */
-                    g_shell_editor_active = 0;
+                if (shell_editor_start(buf, sizeof(buf), prompt) != 0) {
+                    LOG_ERROR("Failed to restart line editor");
+                    exit_code = SHELL_EXIT_USER;
+                    break;
+                }
+            } else {
+                int shell_err = 0;
+                platform_shell_input_action_t action = platform_shell_input_classify_last_error(&shell_err);
+
+                if (action == PLATFORM_SHELL_INPUT_ACTION_USER_EXIT) {
+                    shell_editor_stop(false);
                     printf("\nQuit\n");
                     exit_code = SHELL_EXIT_USER;
                     break;
+                } else if (action == PLATFORM_SHELL_INPUT_ACTION_IO_ERROR) {
+                    LOG_ERROR("linenoiseEditFeed failed: %d", shell_err);
+                    exit_code = SHELL_EXIT_USER;
+                    break;
+                } else {
+                    continue;
                 }
             }
         }
@@ -377,10 +425,6 @@ int client_shell_loop(void)
         }
     }
     
-    if (g_shell_editor_active) {
-        linenoiseEditStop(&g_ls);
-        /* Async write synchronization: stop -> inactive. */
-        g_shell_editor_active = 0;
-    }
+    shell_editor_stop(false);
     return exit_code;
 }
