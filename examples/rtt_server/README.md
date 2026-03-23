@@ -233,12 +233,34 @@ client_demo/
 
 2. **Compile the Client**
    - Navigate to the `client_demo` directory.
-   - Modify the cross-compilation toolchain path in the [Makefile](file:///home/embedsky/share/iso14229/examples/rtt_server/client_demo/Makefile) (if necessary).
-   - Execute the compilation command:
+   - Default path (native build with CMake):
      ```bash
-     make                    # Cross-compile (default)
-     make NATIVE=1          # Native compilation for testing
+     mkdir -p build
+     cd build
+     cmake ..
+     cmake --build . -j
      ```
+   - Cross-compilation (explicit toolchain file):
+     ```bash
+     mkdir -p build
+     cd build
+     cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
+     cmake --build . -j
+     ```
+   - Optional deploy helper target (`download`):
+     default remote run command: `./client -i can1 -s 7D1 -t 7E1 -f 7E0`
+     ```bash
+     mkdir -p build
+     cd build
+     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
+     cmake --build . --target download
+     ```
+   - Optional extra suffix args for remote command:
+     ```bash
+     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake -DDOWNLOAD_CLIENT_EXTRA_ARGS="--your-extra-args" ..
+     cmake --build . --target download
+     ```
+   - The existing [Makefile](file:///home/embedsky/share/iso14229/examples/rtt_server/client_demo/Makefile) remains available for compatibility.
 
 3. **Run the Client**
    - Execute the generated client program:

@@ -233,12 +233,39 @@ client_demo/
 
 2. **编译客户端**
    - 进入`client_demo`目录
-   - 修改`Makefile`中的交叉编译工具链路径（如果需要）
-   - 执行编译命令：
+   - 默认路径（CMake 本机构建）：
      ```bash
-     make                    # 交叉编译（默认）
-     make NATIVE=1          # 本地编译用于测试
+     mkdir -p build
+     cd build
+     cmake ..
+     cmake --build . -j
      ```
+   - 交叉编译（显式传 toolchain file）：
+     ```bash
+     mkdir -p build
+     cd build
+     cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
+     cmake --build . -j
+     ```
+   - 可选部署辅助目标（`download`）：
+     默认会在目标机执行：`./client -i can1 -s 7D1 -t 7E1 -f 7E0`
+     ```bash
+     mkdir -p build
+     cd build
+     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
+     cmake --build . --target download
+     ```
+   - 如需追加后缀参数（可选）：
+     ```bash
+     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake -DDOWNLOAD_CLIENT_EXTRA_ARGS="--your-extra-args" ..
+     cmake --build . --target download
+     ```
+   - 参考示例
+      ```bash
+      cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake -DDOWNLOAD_CLIENT_IF=can1 -DDOWNLOAD_CLIENT_SA=7D1 -DDOWNLOAD_CLIENT_TA=7E1 -DDOWNLOAD_CLIENT_FA=7E0 ..
+      cmake --build . --target download
+      ```
+   - 现有 [Makefile](file:///home/embedsky/share/iso14229/examples/rtt_server/client_demo/Makefile) 仍保留用于兼容。
 
 3. **运行客户端**
    - 执行生成的客户端程序：
