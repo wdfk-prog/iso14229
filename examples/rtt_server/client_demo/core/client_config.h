@@ -1,16 +1,10 @@
 /**
  * @file core/client_config.h
- * @brief Runtime Configuration Definitions for the UDS Client.
- * @details This header defines the default connection parameters, system limits,
- *          and the runtime configuration structure used to maintain the
- *          state of the UDS connection.
- * @author wdfk-prog
- * @version 1.0
- * @date 2025-12-02
- *
- * @copyright Copyright (c) 2025
+ * @brief Runtime configuration definitions for the UDS client.
+ * @details This header keeps application-facing configuration independent from
+ *          transport implementation details. The transport layer selects the
+ *          concrete backend later inside `uds_context.c`.
  */
-
 #ifndef CLIENT_CONFIG_H
 #define CLIENT_CONFIG_H
 
@@ -18,98 +12,101 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* ==========================================================================
  * Default Configuration (Fallback)
  * ========================================================================== */
 
-/** @brief Default SocketCAN interface name if not provided via CLI. */
-#define DEFAULT_CAN_IF      "can1"
+#if defined(_WIN32) && defined(UDS_ENABLE_PYCAN_BRIDGE)
+#define DEFAULT_TRANSPORT_BACKEND_NAME "pycan_bridge"
+#else
+#define DEFAULT_TRANSPORT_BACKEND_NAME "socketcan"
+#endif
 
-/** @brief Default Client Physical Source Address (Tester ID). */
-#define DEFAULT_PHYS_SA     0x7E8
+#define DEFAULT_CAN_IF                 "can1"
+#define DEFAULT_PYCAN_PYTHON_EXE       "python"
+#define DEFAULT_PYCAN_BRIDGE_SCRIPT    "tools/pycan_bridge.py"
+#define DEFAULT_PYCAN_INTERFACE        "gs_usb"
+#define DEFAULT_PYCAN_CHANNEL          "0"
+#define DEFAULT_PYCAN_HOST             "127.0.0.1"
+#define DEFAULT_PYCAN_PORT             29536U
+#define DEFAULT_PYCAN_BITRATE          500000U
+#define DEFAULT_PYCAN_RX_QUEUE_CAP     256U
+#define DEFAULT_PYCAN_OPEN_TIMEOUT_MS  4000U
+#define DEFAULT_PYCAN_IO_TIMEOUT_MS    250U
+#define DEFAULT_TRANSPORT_TIMEOUT_MS   2000U
 
-/** @brief Default Server Physical Target Address (ECU Rx ID). */
-#define DEFAULT_PHYS_TA     0x7E0
-
-/** @brief Default Client Functional Source Address (Broadcast ID). */
-#define DEFAULT_FUNC_SA     0x7DF
+#define DEFAULT_PHYS_SA                0x7E8U
+#define DEFAULT_PHYS_TA                0x7E0U
+#define DEFAULT_FUNC_SA                0x7DFU
 
 /* ==========================================================================
  * ISO 14229 Timing Configuration
  * ========================================================================== */
 
-/**
- * @brief Default P2_Client_Max timeout in milliseconds.
- * @details Time the client waits for an initial response from the server.
- *          ISO 14229-2 standard default is often 150ms or 50ms depending on bus.
- */
-#define CLIENT_DEFAULT_P2_MS    150
-
-/**
- * @brief Default P2*_Client_Max timeout in milliseconds.
- * @details Time the client waits after receiving an NRC 0x78 (Response Pending).
- *          ISO 14229-2 standard default is typically 5000ms (modified here to 2000ms).
- */
-#define CLIENT_DEFAULT_P2_STAR  2000
-
-/**
- * @brief TesterPresent (0x3E) Heartbeat interval in milliseconds.
- * @details Must be sent periodically to keep non-default sessions active.
- *          Typically set to ~2000ms (S3_Client time).
- */
-#define CLIENT_HEARTBEAT_MS     2000
+#define CLIENT_DEFAULT_P2_MS           150U
+#define CLIENT_DEFAULT_P2_STAR         2000U
+#define CLIENT_HEARTBEAT_MS            2000U
 
 /* ==========================================================================
  * Application Limits & Buffer Sizes
  * ========================================================================== */
 
-/** @brief Maximum number of registered local shell commands. */
-#define MAX_COMMANDS            32
+#define MAX_COMMANDS                   32
+#define CMD_MAX_LINE                   4096
+#define CMD_MAX_ARGS                   16
 
-/** @brief Maximum length of a single command line input string. */
-#define CMD_MAX_LINE            4096
-
-/** @brief Maximum number of arguments parsed in a single command. */
-#define CMD_MAX_ARGS            16
+#define CLIENT_CFG_STR_SMALL           32U
+#define CLIENT_CFG_STR_MEDIUM          64U
+#define CLIENT_CFG_STR_LARGE           128U
+#define CLIENT_CFG_STR_XL              256U
 
 /* ==========================================================================
  * Runtime Configuration Structure
  * ========================================================================== */
 
-/**
- * @brief Runtime configuration container.
- * @details Stores the actual values used for the connection, which may differ
- *          from the DEFAULT_ macros if overridden by command-line arguments.
- */
+typedef enum {
+    CLIENT_BACKEND_SOCKETCAN = 0,
+    CLIENT_BACKEND_PYCAN_BRIDGE = 1,
+} client_transport_backend_t;
+
 typedef struct {
-    char if_name[32];   /**< SocketCAN Interface Name (e.g., "can0") */
-    uint32_t phys_sa;   /**< Client Physical Source Address (Tester) */
-    uint32_t phys_ta;   /**< Server Physical Target Address (ECU) */
-    uint32_t func_sa;   /**< Functional/Broadcast Source Address */
+    char if_name[CLIENT_CFG_STR_SMALL];
+} client_socketcan_config_t;
+
+typedef struct {
+    char python_exe[CLIENT_CFG_STR_MEDIUM];
+    char bridge_script[CLIENT_CFG_STR_XL];
+    char interface_name[CLIENT_CFG_STR_SMALL];
+    char channel_name[CLIENT_CFG_STR_MEDIUM];
+    char host[CLIENT_CFG_STR_SMALL];
+    uint16_t port;
+    uint32_t bitrate;
+    uint32_t rx_queue_capacity;
+    uint32_t open_timeout_ms;
+    uint32_t io_timeout_ms;
+    bool auto_spawn;
+    bool use_canfd;
+    bool use_brs;
+    bool use_extended_ids;
+    bool debug_tcp_mode;
+} client_pycan_bridge_config_t;
+
+typedef struct {
+    client_transport_backend_t backend;
+    uint32_t phys_sa;
+    uint32_t phys_ta;
+    uint32_t func_sa;
+    uint32_t timeout_ms;
+    client_socketcan_config_t socketcan;
+    client_pycan_bridge_config_t pycan_bridge;
 } client_runtime_config_t;
 
-/* ==========================================================================
- * Global Variables & API
- * ========================================================================== */
-
-/**
- * @brief Global Configuration Instance.
- * @details This variable is the "Single Source of Truth" for the application's
- *          network configuration. It is populated in main/config parser and
- *          read by the UDS context.
- */
 extern client_runtime_config_t g_uds_cfg;
 
-/**
- * @brief Parses command line arguments to override default configurations.
- * @details Supports standard getopt flags (e.g., -i, -s, -t) to modify
- *          interface and address settings at runtime.
- *
- * @param argc Argument count from main().
- * @param argv Argument vector from main().
- */
+const char *client_config_backend_name(client_transport_backend_t backend);
 void client_config_parse_args(int argc, char **argv);
 
 #ifdef __cplusplus

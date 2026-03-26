@@ -115,7 +115,9 @@ int main(int argc, char **argv)
             }
         }
 
-        LOG_INFO("Auto-Connecting to ECU (0x%X)...", g_uds_cfg.phys_ta);
+        LOG_INFO("Auto-Connecting to ECU (backend=%s, target=0x%X)...",
+                 client_config_backend_name(g_uds_cfg.backend),
+                 g_uds_cfg.phys_ta);
 
         /* B. Connection Sequence */
         while (retries--) {

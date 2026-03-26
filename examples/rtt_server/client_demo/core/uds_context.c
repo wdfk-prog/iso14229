@@ -197,6 +197,7 @@ int uds_context_init(void)
     UDSErr_t err;
     uds_transport_open_cfg_t open_cfg = {0};
     uds_transport_socketcan_cfg_t socketcan_cfg = {0};
+    uds_transport_pycan_bridge_cfg_t pycan_cfg = {0};
 
     /* 1. Reset state */
     uds_transport_close(&g_transport);
@@ -211,22 +212,62 @@ int uds_context_init(void)
         return -1;
     }
 
-    socketcan_cfg.if_name = g_uds_cfg.if_name;
-    open_cfg.backend = UDS_TRANSPORT_BACKEND_SOCKETCAN;
     open_cfg.phys_sa = g_uds_cfg.phys_sa;
     open_cfg.phys_ta = g_uds_cfg.phys_ta;
     open_cfg.func_sa = g_uds_cfg.func_sa;
-    open_cfg.backend_cfg = &socketcan_cfg;
+
+    switch (g_uds_cfg.backend) {
+    case CLIENT_BACKEND_SOCKETCAN:
+        socketcan_cfg.if_name = g_uds_cfg.socketcan.if_name;
+        open_cfg.backend = UDS_TRANSPORT_BACKEND_SOCKETCAN;
+        open_cfg.backend_cfg = &socketcan_cfg;
+        break;
+
+    case CLIENT_BACKEND_PYCAN_BRIDGE:
+        pycan_cfg.python_exe = g_uds_cfg.pycan_bridge.python_exe;
+        pycan_cfg.bridge_script = g_uds_cfg.pycan_bridge.bridge_script;
+        pycan_cfg.interface_name = g_uds_cfg.pycan_bridge.interface_name;
+        pycan_cfg.channel_name = g_uds_cfg.pycan_bridge.channel_name;
+        pycan_cfg.host = g_uds_cfg.pycan_bridge.host;
+        pycan_cfg.port = g_uds_cfg.pycan_bridge.port;
+        pycan_cfg.bitrate = g_uds_cfg.pycan_bridge.bitrate;
+        pycan_cfg.rx_queue_capacity = g_uds_cfg.pycan_bridge.rx_queue_capacity;
+        pycan_cfg.open_timeout_ms = g_uds_cfg.pycan_bridge.open_timeout_ms;
+        pycan_cfg.io_timeout_ms = g_uds_cfg.pycan_bridge.io_timeout_ms;
+        pycan_cfg.auto_spawn = g_uds_cfg.pycan_bridge.auto_spawn;
+        pycan_cfg.use_canfd = g_uds_cfg.pycan_bridge.use_canfd;
+        pycan_cfg.use_brs = g_uds_cfg.pycan_bridge.use_brs;
+        pycan_cfg.use_extended_ids = g_uds_cfg.pycan_bridge.use_extended_ids;
+        pycan_cfg.ipc_mode = g_uds_cfg.pycan_bridge.debug_tcp_mode
+                              ? UDS_PYCAN_BRIDGE_IPC_TCP_JSONL
+                              : UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL;
+        open_cfg.backend = UDS_TRANSPORT_BACKEND_PYCAN_BRIDGE;
+        open_cfg.backend_cfg = &pycan_cfg;
+        break;
+
+    default:
+        LOG_ERROR("Unsupported configured backend: %d", (int)g_uds_cfg.backend);
+        return -1;
+    }
 
     /* 2. Initialize Transport Backend */
     if (uds_transport_open(&g_transport, &open_cfg) != 0) {
-        LOG_ERROR("Failed to init SocketCAN on %s", g_uds_cfg.if_name);
+        if (g_uds_cfg.backend == CLIENT_BACKEND_SOCKETCAN) {
+            LOG_ERROR("Failed to init SocketCAN on %s", g_uds_cfg.socketcan.if_name);
+        } else if (g_uds_cfg.backend == CLIENT_BACKEND_PYCAN_BRIDGE) {
+            LOG_ERROR("Failed to init pycan_bridge (%s, channel=%s)",
+                      g_uds_cfg.pycan_bridge.interface_name,
+                      g_uds_cfg.pycan_bridge.channel_name);
+        } else {
+            LOG_ERROR("Failed to init transport backend %d", (int)g_uds_cfg.backend);
+        }
         uds_transport_close(&g_transport);
         g_client.tp = NULL;
         g_client.fn = NULL;
         return -1;
     }
     uds_transport_set_error_callback(&g_transport, on_transport_error, NULL);
+    uds_transport_set_timeout(&g_transport, g_uds_cfg.timeout_ms);
 
     /* 3. Initialize Client */
     err = UDSClientInit(&g_client);
@@ -247,7 +288,16 @@ int uds_context_init(void)
     }
     g_client.fn = client_event_handler;
 
-    LOG_INFO("UDS Context Initialized (IF: %s)", g_uds_cfg.if_name);
+    if (g_uds_cfg.backend == CLIENT_BACKEND_SOCKETCAN) {
+        LOG_INFO("UDS Context Initialized (backend=%s if=%s)",
+                 client_config_backend_name(g_uds_cfg.backend),
+                 g_uds_cfg.socketcan.if_name);
+    } else if (g_uds_cfg.backend == CLIENT_BACKEND_PYCAN_BRIDGE) {
+        LOG_INFO("UDS Context Initialized (backend=%s if=%s channel=%s)",
+                 client_config_backend_name(g_uds_cfg.backend),
+                 g_uds_cfg.pycan_bridge.interface_name,
+                 g_uds_cfg.pycan_bridge.channel_name);
+    }
     return 0;
 }
 
