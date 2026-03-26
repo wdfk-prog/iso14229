@@ -15,6 +15,10 @@ const uds_transport_ops_t *uds_transport_socketcan_ops(void);
 const uds_transport_ops_t *uds_transport_tsmaster_ops(void);
 #endif
 
+#if defined(UDS_TRANSPORT_ENABLE_PYCAN_BRIDGE)
+const uds_transport_ops_t *uds_transport_pycan_bridge_ops(void);
+#endif
+
 static const uds_transport_ops_t *transport_select_ops(uds_transport_backend_t backend)
 {
     switch (backend) {
@@ -28,6 +32,13 @@ static const uds_transport_ops_t *transport_select_ops(uds_transport_backend_t b
         case UDS_TRANSPORT_BACKEND_TSMASTER:
 #if defined(UDS_TRANSPORT_ENABLE_TSMASTER)
             return uds_transport_tsmaster_ops();
+#else
+            return NULL;
+#endif
+
+        case UDS_TRANSPORT_BACKEND_PYCAN_BRIDGE:
+#if defined(UDS_TRANSPORT_ENABLE_PYCAN_BRIDGE)
+            return uds_transport_pycan_bridge_ops();
 #else
             return NULL;
 #endif

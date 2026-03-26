@@ -3,8 +3,9 @@
  * @brief Minimal transport abstraction for multi-backend UDS client support.
  *
  * This header defines a compact transport boundary so `uds_context` can switch
- * between Linux SocketCAN and future Windows TSMaster backends while keeping
- * upper-layer UDS command/service code stable.
+ * between Linux SocketCAN, legacy Windows TSMaster, and the new Windows
+ * Python-sidecar CAN bridge backend while keeping upper-layer UDS command and
+ * service code stable.
  */
 #ifndef TRANSPORT_H
 #define TRANSPORT_H
@@ -22,10 +23,11 @@ extern "C" {
 /*
  * Static storage budget for backend private contexts.
  *
- * The Windows TSMaster backend embeds an ISO-TP client instance, a receive
- * queue, dynamic-loader state, and synchronization primitives. Keep this value
- * comfortably above the largest backend context so callers can bind a single
- * fixed-size storage block without backend-specific allocation.
+ * The Windows TSMaster and future pycan_bridge backends both embed an ISO-TP
+ * client instance, a receive queue, process/IPC state, and synchronization
+ * primitives. Keep this value comfortably above the largest backend context so
+ * callers can bind a single fixed-size storage block without backend-specific
+ * allocation.
  */
 #define UDS_TRANSPORT_STORAGE_CAPACITY (64U * 1024U)
 
@@ -35,6 +37,7 @@ extern "C" {
 typedef enum {
     UDS_TRANSPORT_BACKEND_SOCKETCAN = 0,
     UDS_TRANSPORT_BACKEND_TSMASTER = 1,
+    UDS_TRANSPORT_BACKEND_PYCAN_BRIDGE = 2,
 } uds_transport_backend_t;
 
 /**
@@ -89,6 +92,42 @@ typedef struct {
     bool install_term_resistor;
     bool use_extended_ids;
 } uds_transport_tsmaster_cfg_t;
+
+/**
+ * @brief IPC mode for the Windows pycan_bridge backend.
+ * @details Task 1 fixes the primary IPC contract to local child-process stdio
+ *          carrying UTF-8 JSON Lines messages. A loopback TCP mode is kept as a
+ *          debug-only reserve option for development and packet capture.
+ */
+typedef enum {
+    UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL = 0,
+    UDS_PYCAN_BRIDGE_IPC_TCP_JSONL = 1,
+} uds_transport_pycan_bridge_ipc_t;
+
+/**
+ * @brief Windows pycan_bridge backend-specific open configuration.
+ * @details The Python sidecar owns hardware discovery and raw CAN frame I/O.
+ *          The C transport backend continues to own ISO-TP (`UDSISOTpC_t`) and
+ *          UDS state. String pointers are borrowed only for the duration of
+ *          `uds_transport_open()`; backend implementations must copy them.
+ */
+typedef struct {
+    const char *python_exe;          /**< Python executable used to spawn the sidecar. */
+    const char *bridge_script;       /**< Path to `pycan_bridge.py`. */
+    const char *interface_name;      /**< `gs_usb` preferred, `slcan` fallback. */
+    const char *channel_name;        /**< `python-can` channel string. Use `0` for single-device `gs_usb`; use `COM4@9600` or URL for `slcan`. */
+    const char *host;                /**< Loopback host for debug TCP mode; usually `127.0.0.1`. */
+    uint16_t port;                   /**< Loopback port for debug TCP mode. */
+    uint32_t bitrate;                /**< Arbitration bitrate in bits/s. */
+    uint32_t rx_queue_capacity;      /**< Suggested host-side RX queue depth in frames. */
+    uint32_t open_timeout_ms;        /**< Sidecar spawn/open timeout. */
+    uint32_t io_timeout_ms;          /**< Command/response wait timeout. */
+    bool auto_spawn;                 /**< Spawn sidecar from C client when true. */
+    bool use_canfd;                  /**< Enable CAN FD on the Python sidecar when true. */
+    bool use_brs;                    /**< Enable bit-rate switching on CAN FD frames. */
+    bool use_extended_ids;           /**< Default outgoing identifier mode. */
+    uds_transport_pycan_bridge_ipc_t ipc_mode; /**< IPC mode; stdio JSONL is primary. */
+} uds_transport_pycan_bridge_cfg_t;
 
 /**
  * @brief Transport-layer asynchronous error callback.
