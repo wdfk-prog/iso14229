@@ -1,0 +1,13 @@
+# Python-side dependencies for Task 3 smoke/bridge tooling.
+# Install inside a dedicated venv on Windows from the repository root:
+#   py -3 -m venv .venv
+#   .venv\Scripts\python -m pip install -U pip
+#   .venv\Scripts\python -m pip install -r client_demo\tools\requirements-pycan.txt
+python-can>=4.4,<5
+pyserial>=3.5
+pyusb>=1.2
+# gs_usb is required for the gs_usb/candleLight path used by canlight-compatible adapters.
+gs-usb>=0.3.0
+# On Windows, the gs_usb path needs a libusb backend that PyUSB can actually open.
+# This package bundles libusb and exposes helper APIs used by pycan_runtime.py.
+libusb-package>=1.0.26; platform_system == "Windows"
