@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import binascii
 import json
+import socket
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ from typing import Any, Dict, Iterable, Optional
 
 PROTOCOL_VERSION = "pycan-bridge/1"
 DEFAULT_PYTHON = "python"
-DEFAULT_BRIDGE_SCRIPT = "tools/pycan_bridge.py"
+DEFAULT_BRIDGE_SCRIPT = "client_demo/tools/pycan_bridge.py"
 SUPPORTED_INTERFACES = {"gs_usb", "slcan"}
 GS_USB_VENDOR_ID = 0x1D50
 GS_USB_PRODUCT_ID = 0x606F
@@ -48,16 +49,62 @@ class BusOpenOptions:
 class JsonLineWriter:
     """Thread-safe JSON Lines writer."""
 
-    def __init__(self, stream) -> None:
+    def __init__(self, stream, *, owns_stream: bool = False) -> None:
         self._stream = stream
+        self._owns_stream = owns_stream
         self._lock = threading.Lock()
 
     def write(self, payload: Dict[str, Any]) -> None:
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self._lock:
-            self._stream.write(line)
-            self._stream.write("\n")
-            self._stream.flush()
+            if self._stream is None:
+                raise BrokenPipeError("writer stream is already closed")
+            if hasattr(self._stream, "sendall"):
+                self._stream.sendall(line.encode("utf-8"))
+            else:
+                self._stream.write(line)
+                self._stream.flush()
+
+    def close(self, *, abort: bool = False) -> None:
+        with self._lock:
+            stream = self._stream
+            self._stream = None
+
+        if stream is None or not self._owns_stream:
+            return
+
+        if hasattr(stream, "sendall"):
+            if abort:
+                try:
+                    stream.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+            return
+
+        if abort and hasattr(stream, "detach"):
+            try:
+                detached = stream.detach()
+            except Exception:
+                detached = None
+            if detached is not None:
+                try:
+                    detached.close()
+                except Exception:
+                    pass
+            return
+
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 class SequenceCounter:
@@ -84,8 +131,9 @@ def load_python_can():
     try:
         import can  # type: ignore
     except ImportError as exc:  # pragma: no cover - depends on host env
+        req_hint = Path(__file__).resolve().with_name("requirements-pycan.txt")
         raise DependencyError(
-            "python-can is not installed. Install with: pip install -r tools/requirements-pycan.txt"
+            f"python-can is not installed. Install with: pip install -r {req_hint}"
         ) from exc
     return can
 

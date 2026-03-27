@@ -36,6 +36,25 @@
       "cacheVariables": {
         "UDS_TSMASTER_SDK_DIR": "D:/TOSUN/TSMaster/Data/SDK"
       }
+    },
+    {
+      "name": "windows-pycan-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-mingw64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "UDS_ENABLE_WINDOWS": "ON",
+        "UDS_WIN_BACKEND": "PYCAN_BRIDGE",
+        "UDS_WIN_ARCH": "x64",
+        "UDS_BUILD_WINDOWS_SMOKE": "ON"
+      }
+    },
+    {
+      "name": "windows-pycan-mingw64",
+      "displayName": "Windows / MSYS2 MINGW64 + pycan smoke",
+      "description": "Build the Windows smoke target with the PYCAN_BRIDGE backend.",
+      "inherits": "windows-pycan-base"
     }
   ],
   "buildPresets": [
@@ -49,6 +68,13 @@
     {
       "name": "build-client-smoke-inline-sdk",
       "configurePreset": "windows-tsmaster-mingw64-inline-sdk",
+      "targets": [
+        "client_smoke"
+      ]
+    },
+    {
+      "name": "build-client-smoke-pycan",
+      "configurePreset": "windows-pycan-mingw64",
       "targets": [
         "client_smoke"
       ]

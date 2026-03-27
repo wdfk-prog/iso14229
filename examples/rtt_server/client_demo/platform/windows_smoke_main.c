@@ -1,12 +1,12 @@
 /**
  * @file windows_smoke_main.c
  * @brief Minimal Windows smoke executable for Task 6B / Task 7 validation.
- * @details Adds optional `tsmaster_smoke.conf` loading while keeping the
+ * @details Adds optional `client_smoke.conf` loading while keeping the
  *          original environment-variable override behavior intact.
  *
  * Configuration precedence:
  *   1. Built-in defaults
- *   2. Config file (`./tsmaster_smoke.conf` or `UDS_SMOKE_CONF`)
+ *   2. Config file (`./client_smoke.conf`, legacy `./tsmaster_smoke.conf`, or `UDS_SMOKE_CONF`)
  *   3. Environment variables (`UDS_SMOKE_*`)
  */
 
@@ -23,19 +23,35 @@
 #define SMOKE_DEFAULT_PHYS_TX_ID   0x7E0u
 #define SMOKE_DEFAULT_FUNC_TX_ID   0x7DFu
 #define SMOKE_DEFAULT_APP_NAME     "UDSClient"
-#define SMOKE_DEFAULT_HW_NAME      "TSMaster"
+#define SMOKE_DEFAULT_HW_NAME      "TSMaster" /* legacy backend default only */
 #define SMOKE_DEFAULT_CAN_BAUD     500.0f
 #define SMOKE_DEFAULT_CANFD_ARB    500.0f
 #define SMOKE_DEFAULT_CANFD_DATA   2000.0f
+#define SMOKE_DEFAULT_PYTHON_EXE   "python"
+#define SMOKE_DEFAULT_BRIDGE_SCRIPT "client_demo/tools/pycan_bridge.py"
+#define SMOKE_DEFAULT_PYCAN_IF     "gs_usb"
+#define SMOKE_DEFAULT_PYCAN_CH     "0"
+#define SMOKE_DEFAULT_PYCAN_HOST   "127.0.0.1"
+#define SMOKE_DEFAULT_PYCAN_PORT   29536u
+#define SMOKE_DEFAULT_PYCAN_BITRATE 500000u
+#define SMOKE_DEFAULT_PYCAN_RXQ    256u
+#define SMOKE_DEFAULT_PYCAN_OPEN_TIMEOUT_MS 4000u
+#define SMOKE_DEFAULT_PYCAN_IO_TIMEOUT_MS   250u
 
 #define SMOKE_MAX_NAME_LEN         64u
 #define SMOKE_MAX_PATH_LEN         260u
 #define SMOKE_MAX_LINE_LEN         512u
+#define SMOKE_MAX_CHANNEL_LEN      128u
 
 typedef struct {
     char app_name[SMOKE_MAX_NAME_LEN];
     char hw_device_name[SMOKE_MAX_NAME_LEN];
     char conf_path[SMOKE_MAX_PATH_LEN];
+    char pycan_python_exe[SMOKE_MAX_PATH_LEN];
+    char pycan_bridge_script[SMOKE_MAX_PATH_LEN];
+    char pycan_interface[SMOKE_MAX_NAME_LEN];
+    char pycan_channel[SMOKE_MAX_CHANNEL_LEN];
+    char pycan_host[SMOKE_MAX_NAME_LEN];
     uint32_t phys_rx_id;
     uint32_t phys_tx_id;
     uint32_t func_tx_id;
@@ -47,10 +63,17 @@ typedef struct {
     float can_baudrate_kbps;
     float canfd_arb_baudrate_kbps;
     float canfd_data_baudrate_kbps;
+    uint32_t pycan_port;
+    uint32_t pycan_bitrate;
+    uint32_t pycan_rx_queue_capacity;
+    uint32_t pycan_open_timeout_ms;
+    uint32_t pycan_io_timeout_ms;
     int use_canfd;
     int use_brs;
     int install_term_resistor;
     int use_extended_ids;
+    int pycan_auto_spawn;
+    int pycan_debug_tcp_mode;
     int conf_loaded;
 } smoke_settings_t;
 
@@ -241,6 +264,21 @@ static int smoke_read_float_env(const char *name, float *out_value)
     return smoke_parse_float_text(value, out_value);
 }
 
+static int smoke_parse_tcp_port_text(const char *value, uint32_t *out_value)
+{
+    uint32_t parsed;
+
+    if (!smoke_parse_u32_text(value, &parsed)) {
+        return 0;
+    }
+    if (parsed == 0u || parsed > 65535u) {
+        return 0;
+    }
+
+    *out_value = parsed;
+    return 1;
+}
+
 static void smoke_settings_init_defaults(smoke_settings_t *cfg)
 {
     if (cfg == NULL) {
@@ -261,10 +299,22 @@ static void smoke_settings_init_defaults(smoke_settings_t *cfg)
     cfg->can_baudrate_kbps = SMOKE_DEFAULT_CAN_BAUD;
     cfg->canfd_arb_baudrate_kbps = SMOKE_DEFAULT_CANFD_ARB;
     cfg->canfd_data_baudrate_kbps = SMOKE_DEFAULT_CANFD_DATA;
+    smoke_copy_string(cfg->pycan_python_exe, sizeof(cfg->pycan_python_exe), SMOKE_DEFAULT_PYTHON_EXE);
+    smoke_copy_string(cfg->pycan_bridge_script, sizeof(cfg->pycan_bridge_script), SMOKE_DEFAULT_BRIDGE_SCRIPT);
+    smoke_copy_string(cfg->pycan_interface, sizeof(cfg->pycan_interface), SMOKE_DEFAULT_PYCAN_IF);
+    smoke_copy_string(cfg->pycan_channel, sizeof(cfg->pycan_channel), SMOKE_DEFAULT_PYCAN_CH);
+    smoke_copy_string(cfg->pycan_host, sizeof(cfg->pycan_host), SMOKE_DEFAULT_PYCAN_HOST);
+    cfg->pycan_port = SMOKE_DEFAULT_PYCAN_PORT;
+    cfg->pycan_bitrate = SMOKE_DEFAULT_PYCAN_BITRATE;
+    cfg->pycan_rx_queue_capacity = SMOKE_DEFAULT_PYCAN_RXQ;
+    cfg->pycan_open_timeout_ms = SMOKE_DEFAULT_PYCAN_OPEN_TIMEOUT_MS;
+    cfg->pycan_io_timeout_ms = SMOKE_DEFAULT_PYCAN_IO_TIMEOUT_MS;
     cfg->use_canfd = 0;
     cfg->use_brs = 0;
     cfg->install_term_resistor = 0;
     cfg->use_extended_ids = 0;
+    cfg->pycan_auto_spawn = 1;
+    cfg->pycan_debug_tcp_mode = 0;
     cfg->conf_loaded = 0;
 }
 
@@ -288,6 +338,27 @@ static void smoke_settings_apply_env(smoke_settings_t *cfg)
     value = smoke_get_env_nonempty("UDS_SMOKE_HW_NAME");
     if (value != NULL) {
         smoke_copy_string(cfg->hw_device_name, sizeof(cfg->hw_device_name), value);
+    }
+
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_PYTHON");
+    if (value != NULL) {
+        smoke_copy_string(cfg->pycan_python_exe, sizeof(cfg->pycan_python_exe), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_BRIDGE_SCRIPT");
+    if (value != NULL) {
+        smoke_copy_string(cfg->pycan_bridge_script, sizeof(cfg->pycan_bridge_script), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_INTERFACE");
+    if (value != NULL) {
+        smoke_copy_string(cfg->pycan_interface, sizeof(cfg->pycan_interface), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_CHANNEL");
+    if (value != NULL) {
+        smoke_copy_string(cfg->pycan_channel, sizeof(cfg->pycan_channel), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_HOST");
+    if (value != NULL) {
+        smoke_copy_string(cfg->pycan_host, sizeof(cfg->pycan_host), value);
     }
 
     if (smoke_read_u32_env("UDS_SMOKE_APP_CHANNEL", &u32_value)) {
@@ -335,6 +406,28 @@ static void smoke_settings_apply_env(smoke_settings_t *cfg)
     if (smoke_read_u32_env("UDS_SMOKE_FUNC_TX_ID", &u32_value)) {
         cfg->func_tx_id = u32_value;
     }
+    value = smoke_get_env_nonempty("UDS_SMOKE_PYCAN_PORT");
+    if (value != NULL && smoke_parse_tcp_port_text(value, &u32_value)) {
+        cfg->pycan_port = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_PYCAN_BITRATE", &u32_value)) {
+        cfg->pycan_bitrate = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_PYCAN_RX_QUEUE", &u32_value)) {
+        cfg->pycan_rx_queue_capacity = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_PYCAN_OPEN_TIMEOUT_MS", &u32_value)) {
+        cfg->pycan_open_timeout_ms = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_PYCAN_IO_TIMEOUT_MS", &u32_value)) {
+        cfg->pycan_io_timeout_ms = u32_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_PYCAN_AUTO_SPAWN", &bool_value)) {
+        cfg->pycan_auto_spawn = bool_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_PYCAN_DEBUG_TCP", &bool_value)) {
+        cfg->pycan_debug_tcp_mode = bool_value;
+    }
 }
 
 static int smoke_apply_conf_kv(smoke_settings_t *cfg, const char *key, const char *value)
@@ -354,6 +447,26 @@ static int smoke_apply_conf_kv(smoke_settings_t *cfg, const char *key, const cha
     }
     if (strcmp(key, "hw_name") == 0 || strcmp(key, "hw_device_name") == 0) {
         smoke_copy_string(cfg->hw_device_name, sizeof(cfg->hw_device_name), value);
+        return 1;
+    }
+    if (strcmp(key, "pycan_python") == 0 || strcmp(key, "pycan_python_exe") == 0) {
+        smoke_copy_string(cfg->pycan_python_exe, sizeof(cfg->pycan_python_exe), value);
+        return 1;
+    }
+    if (strcmp(key, "pycan_bridge") == 0 || strcmp(key, "pycan_bridge_script") == 0) {
+        smoke_copy_string(cfg->pycan_bridge_script, sizeof(cfg->pycan_bridge_script), value);
+        return 1;
+    }
+    if (strcmp(key, "pycan_interface") == 0) {
+        smoke_copy_string(cfg->pycan_interface, sizeof(cfg->pycan_interface), value);
+        return 1;
+    }
+    if (strcmp(key, "pycan_channel") == 0) {
+        smoke_copy_string(cfg->pycan_channel, sizeof(cfg->pycan_channel), value);
+        return 1;
+    }
+    if (strcmp(key, "pycan_host") == 0) {
+        smoke_copy_string(cfg->pycan_host, sizeof(cfg->pycan_host), value);
         return 1;
     }
     if (strcmp(key, "app_channel") == 0 || strcmp(key, "app_channel_index") == 0) {
@@ -461,6 +574,55 @@ static int smoke_apply_conf_kv(smoke_settings_t *cfg, const char *key, const cha
         }
         return 0;
     }
+    if (strcmp(key, "pycan_port") == 0) {
+        if (smoke_parse_tcp_port_text(value, &u32_value)) {
+            cfg->pycan_port = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_bitrate") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->pycan_bitrate = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_rx_queue") == 0 || strcmp(key, "pycan_rx_queue_capacity") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->pycan_rx_queue_capacity = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_open_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->pycan_open_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_io_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->pycan_io_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_auto_spawn") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->pycan_auto_spawn = bool_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "pycan_debug_tcp") == 0 || strcmp(key, "pycan_ipc_tcp") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->pycan_debug_tcp_mode = bool_value;
+            return 1;
+        }
+        return 0;
+    }
 
     return 0;
 }
@@ -540,7 +702,9 @@ static void smoke_try_load_default_conf(smoke_settings_t *cfg)
         return;
     }
 
-    (void)smoke_try_load_conf(cfg, "./tsmaster_smoke.conf");
+    if (!smoke_try_load_conf(cfg, "./client_smoke.conf")) {
+        (void)smoke_try_load_conf(cfg, "./tsmaster_smoke.conf");
+    }
 }
 
 int main(void)
@@ -564,21 +728,23 @@ int main(void)
     {
         uds_transport_pycan_bridge_cfg_t backend_cfg;
         memset(&backend_cfg, 0, sizeof(backend_cfg));
-        backend_cfg.python_exe = "python";
-        backend_cfg.bridge_script = "tools/pycan_bridge.py";
-        backend_cfg.interface_name = "gs_usb";
-        backend_cfg.channel_name = "0";
-        backend_cfg.host = "127.0.0.1";
-        backend_cfg.port = 29536U;
-        backend_cfg.bitrate = 500000U;
-        backend_cfg.rx_queue_capacity = 256U;
-        backend_cfg.open_timeout_ms = 4000U;
-        backend_cfg.io_timeout_ms = 250U;
-        backend_cfg.auto_spawn = true;
+        backend_cfg.python_exe = smoke_cfg.pycan_python_exe;
+        backend_cfg.bridge_script = smoke_cfg.pycan_bridge_script;
+        backend_cfg.interface_name = smoke_cfg.pycan_interface;
+        backend_cfg.channel_name = smoke_cfg.pycan_channel;
+        backend_cfg.host = smoke_cfg.pycan_host;
+        backend_cfg.port = (uint16_t)smoke_cfg.pycan_port;
+        backend_cfg.bitrate = smoke_cfg.pycan_bitrate;
+        backend_cfg.rx_queue_capacity = smoke_cfg.pycan_rx_queue_capacity;
+        backend_cfg.open_timeout_ms = smoke_cfg.pycan_open_timeout_ms;
+        backend_cfg.io_timeout_ms = smoke_cfg.pycan_io_timeout_ms;
+        backend_cfg.auto_spawn = smoke_cfg.pycan_auto_spawn != 0;
         backend_cfg.use_canfd = smoke_cfg.use_canfd != 0;
         backend_cfg.use_brs = smoke_cfg.use_brs != 0;
         backend_cfg.use_extended_ids = smoke_cfg.use_extended_ids != 0;
-        backend_cfg.ipc_mode = UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL;
+        backend_cfg.ipc_mode = smoke_cfg.pycan_debug_tcp_mode != 0
+                                   ? UDS_PYCAN_BRIDGE_IPC_TCP_JSONL
+                                   : UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL;
 
         open_cfg.backend = UDS_TRANSPORT_BACKEND_PYCAN_BRIDGE;
         open_cfg.backend_cfg = &backend_cfg;
@@ -592,11 +758,12 @@ int main(void)
 
         printf("[client_smoke] Windows smoke starting\n");
         printf("[client_smoke] backend=PYCAN_BRIDGE arch=x64 tick_ms=%u\n", platform_tick_ms());
-        printf("[client_smoke] pycan if=%s channel=%s bitrate=%u auto_spawn=%d ext=%d canfd=%d brs=%d\n",
+        printf("[client_smoke] pycan if=%s channel=%s bitrate=%u auto_spawn=%d ipc=%s ext=%d canfd=%d brs=%d\n",
                backend_cfg.interface_name,
                backend_cfg.channel_name,
                (unsigned)backend_cfg.bitrate,
                backend_cfg.auto_spawn ? 1 : 0,
+               backend_cfg.ipc_mode == UDS_PYCAN_BRIDGE_IPC_TCP_JSONL ? "tcp" : "stdio",
                backend_cfg.use_extended_ids ? 1 : 0,
                backend_cfg.use_canfd ? 1 : 0,
                backend_cfg.use_brs ? 1 : 0);
@@ -606,7 +773,7 @@ int main(void)
             fprintf(stderr, "[client_smoke] transport open failed rc=%d last_error=%d\n",
                     rc,
                     uds_transport_get_last_error(&tp));
-            fprintf(stderr, "[client_smoke] tip: ensure python and tools/pycan_bridge.py are reachable, and install python-can dependencies\n");
+            fprintf(stderr, "[client_smoke] tip: ensure python and client_demo/tools/pycan_bridge.py (or tools/pycan_bridge.py) are reachable, and install python-can dependencies\n");
             return 2;
         }
     }

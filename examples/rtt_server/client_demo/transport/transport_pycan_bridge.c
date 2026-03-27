@@ -19,10 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #ifndef UDS_TP_ISOTP_C
 #error "pycan_bridge backend requires UDS_TP_ISOTP_C for Windows builds"
@@ -128,6 +128,8 @@ _Static_assert(sizeof(uds_transport_pycan_ctx_t) <= UDS_TRANSPORT_STORAGE_CAPACI
 
 static UDSTpStatus_t pycan_intercepted_poll(struct UDSTp *hdl);
 
+static void pycan_copy_string(char *dst, size_t dst_size, const char *src, const char *fallback);
+
 static uds_transport_pycan_ctx_t *pycan_ctx(uds_transport_t *tp)
 {
     return (uds_transport_pycan_ctx_t *)tp->backend_ctx;
@@ -157,6 +159,107 @@ static int pycan_record_error(uds_transport_t *tp,
 static uint32_t pycan_now_ms(void)
 {
     return (uint32_t)GetTickCount64();
+}
+
+static bool pycan_file_exists(const char *path)
+{
+    DWORD attrs;
+
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+
+    attrs = GetFileAttributesA(path);
+    return (attrs != INVALID_FILE_ATTRIBUTES) && ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0U);
+}
+
+static bool pycan_looks_like_path(const char *path)
+{
+    return path != NULL &&
+           (strchr(path, '\\') != NULL || strchr(path, '/') != NULL || strchr(path, ':') != NULL);
+}
+
+static void pycan_canonicalize_existing_path(char *path, size_t path_size)
+{
+    char full_path[UDS_PYCAN_STR_LARGE];
+    DWORD rc;
+
+    if (path == NULL || path_size == 0U || !pycan_file_exists(path)) {
+        return;
+    }
+
+    rc = GetFullPathNameA(path, (DWORD)sizeof(full_path), full_path, NULL);
+    if (rc == 0U || rc >= sizeof(full_path)) {
+        return;
+    }
+
+    pycan_copy_string(path, path_size, full_path, full_path);
+}
+
+static void pycan_resolve_python_exe(char *path, size_t path_size)
+{
+    char resolved[UDS_PYCAN_STR_LARGE];
+    DWORD rc;
+
+    if (path == NULL || path_size == 0U || path[0] == '\0') {
+        return;
+    }
+
+    if (pycan_looks_like_path(path) && pycan_file_exists(path)) {
+        pycan_canonicalize_existing_path(path, path_size);
+        return;
+    }
+
+    rc = SearchPathA(NULL, path, NULL, (DWORD)sizeof(resolved), resolved, NULL);
+    if (rc == 0U || rc >= sizeof(resolved) || !pycan_file_exists(resolved)) {
+        return;
+    }
+
+    pycan_copy_string(path, path_size, resolved, resolved);
+}
+
+static bool pycan_is_known_bridge_default(const char *path)
+{
+    return path != NULL &&
+           (strcmp(path, "client_demo/tools/pycan_bridge.py") == 0 ||
+            strcmp(path, "tools/pycan_bridge.py") == 0);
+}
+
+static void pycan_resolve_bridge_script(char *path, size_t path_size)
+{
+    static const char *const k_candidates[] = {
+        "client_demo/tools/pycan_bridge.py",
+        "tools/pycan_bridge.py",
+    };
+    size_t i;
+
+    if (path == NULL || path_size == 0U) {
+        return;
+    }
+
+    if (pycan_file_exists(path)) {
+        pycan_canonicalize_existing_path(path, path_size);
+        return;
+    }
+
+    if (path[0] != '\0' && !pycan_is_known_bridge_default(path)) {
+        return;
+    }
+
+    for (i = 0U; i < ARRAYSIZE(k_candidates); ++i) {
+        if (pycan_file_exists(k_candidates[i])) {
+            pycan_copy_string(path, path_size, k_candidates[i], k_candidates[i]);
+            pycan_canonicalize_existing_path(path, path_size);
+            return;
+        }
+    }
+
+    if (path[0] == '\0') {
+        pycan_copy_string(path, path_size, k_candidates[0], k_candidates[0]);
+        pycan_canonicalize_existing_path(path, path_size);
+    } else {
+        pycan_canonicalize_existing_path(path, path_size);
+    }
 }
 
 static void pycan_copy_string(char *dst, size_t dst_size, const char *src, const char *fallback)
@@ -1254,6 +1357,7 @@ static int pycan_spawn_bridge(uds_transport_pycan_ctx_t *ctx)
     HANDLE parent_stdin_write = NULL;
     HANDLE child_stderr = NULL;
     HANDLE parent_process = GetCurrentProcess();
+    const char *app_name = NULL;
     char cmdline[1024];
     size_t off = 0U;
 
@@ -1309,6 +1413,8 @@ static int pycan_spawn_bridge(uds_transport_pycan_ctx_t *ctx)
         }
     }
 
+    app_name = pycan_file_exists(ctx->python_exe) ? ctx->python_exe : NULL;
+
     memset(&si, 0, sizeof(si));
     memset(&pi, 0, sizeof(pi));
     si.cb = sizeof(si);
@@ -1317,7 +1423,7 @@ static int pycan_spawn_bridge(uds_transport_pycan_ctx_t *ctx)
     si.hStdOutput = (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL) ? child_stdout_write : GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = (child_stderr != NULL && child_stderr != INVALID_HANDLE_VALUE) ? child_stderr : GetStdHandle(STD_ERROR_HANDLE);
 
-    if (!CreateProcessA(NULL,
+    if (!CreateProcessA(app_name,
                         cmdline,
                         NULL,
                         NULL,
@@ -1462,7 +1568,9 @@ static int pycan_apply_runtime_cfg(uds_transport_pycan_ctx_t *ctx,
 
     backend_cfg = (const uds_transport_pycan_bridge_cfg_t *)cfg->backend_cfg;
     pycan_copy_string(ctx->python_exe, sizeof(ctx->python_exe), backend_cfg->python_exe, "python");
-    pycan_copy_string(ctx->bridge_script, sizeof(ctx->bridge_script), backend_cfg->bridge_script, "tools/pycan_bridge.py");
+    pycan_resolve_python_exe(ctx->python_exe, sizeof(ctx->python_exe));
+    pycan_copy_string(ctx->bridge_script, sizeof(ctx->bridge_script), backend_cfg->bridge_script, "client_demo/tools/pycan_bridge.py");
+    pycan_resolve_bridge_script(ctx->bridge_script, sizeof(ctx->bridge_script));
     pycan_copy_string(ctx->interface_name, sizeof(ctx->interface_name), backend_cfg->interface_name, NULL);
     pycan_copy_string(ctx->channel_name, sizeof(ctx->channel_name), backend_cfg->channel_name, NULL);
     pycan_copy_string(ctx->host, sizeof(ctx->host), backend_cfg->host, "127.0.0.1");

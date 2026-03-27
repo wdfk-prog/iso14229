@@ -63,9 +63,19 @@ class BridgeServer:
         self._session: Optional[OpenSession] = None
         self._protocol_lock = threading.Lock()
         self._running = True
+        self._peer_io_broken = False
 
-    def emit(self, payload: Dict[str, Any]) -> None:
-        self.writer.write(payload)
+    def emit(self, payload: Dict[str, Any]) -> bool:
+        if self._peer_io_broken:
+            return False
+        try:
+            self.writer.write(payload)
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._peer_io_broken = True
+            self._running = False
+            log_stderr(f"peer disconnected while sending {payload.get('type', 'message')}: {exc}")
+            return False
 
     def emit_error(self, *, code: str, detail: str, scope: str, reply_to: Optional[int] = None) -> None:
         payload: Dict[str, Any] = {
@@ -79,7 +89,7 @@ class BridgeServer:
             payload["reply_to"] = reply_to
         self.emit(payload)
 
-    def close_session(self, *, reason: str, reply_to: Optional[int] = None) -> None:
+    def close_session(self, *, reason: str, reply_to: Optional[int] = None, notify_peer: bool = True) -> None:
         session = self._session
         self._session = None
         if session is not None:
@@ -95,14 +105,15 @@ class BridgeServer:
             except Exception as exc:  # pragma: no cover - depends on backend
                 log_stderr(f"bus shutdown warning: {exc}")
         self._state = "CLOSED"
-        payload: Dict[str, Any] = {
-            "type": "closed",
-            "seq": self.seq.next(),
-            "reason": reason,
-        }
-        if reply_to is not None:
-            payload["reply_to"] = reply_to
-        self.emit(payload)
+        if notify_peer and not self._peer_io_broken:
+            payload: Dict[str, Any] = {
+                "type": "closed",
+                "seq": self.seq.next(),
+                "reason": reason,
+            }
+            if reply_to is not None:
+                payload["reply_to"] = reply_to
+            self.emit(payload)
 
     def _rx_loop(self, session: OpenSession) -> None:
         while not session.stop_event.is_set():
@@ -116,7 +127,8 @@ class BridgeServer:
             if msg is None:
                 continue
             event = message_to_protocol_dict(msg, seq=self.seq.next())
-            self.emit(event)
+            if not self.emit(event):
+                break
 
     def _abort_session_from_rx_error(self, session: OpenSession, detail: str) -> None:
         session.stop_event.set()
@@ -129,8 +141,9 @@ class BridgeServer:
             if self._session is session:
                 self._session = None
             self._state = "CLOSED"
-            self.emit_error(code="BUS_RECV_FAILED", detail=detail, scope="recv")
-            self.emit({"type": "closed", "seq": self.seq.next(), "reason": "rx_failure"})
+            if not self._peer_io_broken:
+                self.emit_error(code="BUS_RECV_FAILED", detail=detail, scope="recv")
+                self.emit({"type": "closed", "seq": self.seq.next(), "reason": "rx_failure"})
 
     def _open_bus(self, message: Dict[str, Any], reply_to: int) -> None:
         if self._state not in {"HELLO", "CLOSED"}:
@@ -317,7 +330,7 @@ class BridgeServer:
                 return True
 
             if msg_type == "close":
-                self.close_session(reason=require_str(message, "reason", allow_empty=True, default="client_shutdown"), reply_to=msg_seq)
+                self.close_session(reason=require_str(message, "reason", allow_empty=True, default="client_shutdown"), reply_to=msg_seq, notify_peer=not self._peer_io_broken)
                 self._running = False
                 return False
 
@@ -344,7 +357,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def open_stdio_endpoint() -> Tuple[TextIO, JsonLineWriter]:
-    return sys.stdin, JsonLineWriter(sys.stdout)
+    return sys.stdin, JsonLineWriter(sys.stdout, owns_stream=False)
 
 
 def open_tcp_endpoint(host: str, port: int) -> Tuple[TextIO, JsonLineWriter]:
@@ -354,47 +367,64 @@ def open_tcp_endpoint(host: str, port: int) -> Tuple[TextIO, JsonLineWriter]:
     server.close()
     log_stderr(f"accepted TCP client from {addr[0]}:{addr[1]}")
     reader = conn.makefile("r", encoding="utf-8", newline="\n")
-    writer = JsonLineWriter(conn.makefile("w", encoding="utf-8", newline="\n"))
+    writer = JsonLineWriter(conn, owns_stream=True)
     return reader, writer
 
 
 def serve(reader: TextIO, writer: JsonLineWriter, ipc_mode: str) -> int:
     server = BridgeServer(ipc_mode=ipc_mode, writer=writer)
 
-    while server.running:
-        raw_line = reader.readline()
-        if raw_line == "":
-            if server.running and server._session is not None:  # intentional private access for EOF cleanup
-                server.close_session(reason="peer_eof")
-            break
+    try:
+        while server.running:
+            try:
+                raw_line = reader.readline()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                if server.running and server._session is not None:  # intentional private access for peer-reset cleanup
+                    log_stderr(f"peer disconnected while reading command stream: {exc}")
+                    server.close_session(reason="peer_disconnect", notify_peer=False)
+                break
+            if raw_line == "":
+                if server.running and server._session is not None:  # intentional private access for EOF cleanup
+                    server.close_session(reason="peer_eof", notify_peer=False)
+                break
 
-        line = raw_line.strip()
-        if line == "":
-            continue
+            line = raw_line.strip()
+            if line == "":
+                continue
 
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError as exc:
-            server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol")
-            continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol")
+                continue
 
-        try:
-            keep_running = server.handle_message(payload)
-        except (ProtocolError, BridgeConfigError) as exc:
-            reply_to = payload.get("seq") if isinstance(payload, dict) else None
-            if not isinstance(reply_to, int):
-                reply_to = None
-            server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol", reply_to=reply_to)
-            keep_running = True
-        except Exception as exc:  # pragma: no cover - defensive catch
-            reply_to = payload.get("seq") if isinstance(payload, dict) else None
-            if not isinstance(reply_to, int):
-                reply_to = None
-            server.emit_error(code="INTERNAL_EXCEPTION", detail=str(exc), scope="runtime", reply_to=reply_to)
-            keep_running = True
+            try:
+                keep_running = server.handle_message(payload)
+            except (ProtocolError, BridgeConfigError) as exc:
+                reply_to = payload.get("seq") if isinstance(payload, dict) else None
+                if not isinstance(reply_to, int):
+                    reply_to = None
+                server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol", reply_to=reply_to)
+                keep_running = True
+            except Exception as exc:  # pragma: no cover - defensive catch
+                reply_to = payload.get("seq") if isinstance(payload, dict) else None
+                if not isinstance(reply_to, int):
+                    reply_to = None
+                if not server._peer_io_broken:
+                    server.emit_error(code="INTERNAL_EXCEPTION", detail=str(exc), scope="runtime", reply_to=reply_to)
+                keep_running = not server._peer_io_broken
 
-        if not keep_running:
-            break
+            if not keep_running:
+                break
+    finally:
+        if server._session is not None:
+            server.close_session(reason="bridge_shutdown", notify_peer=False)
+        if ipc_mode == "tcp":
+            try:
+                reader.close()
+            except Exception:
+                pass
+        writer.close(abort=server._peer_io_broken)
 
     return 0
 

@@ -27,7 +27,7 @@ extern "C" {
 
 #define DEFAULT_CAN_IF                 "can1"
 #define DEFAULT_PYCAN_PYTHON_EXE       "python"
-#define DEFAULT_PYCAN_BRIDGE_SCRIPT    "tools/pycan_bridge.py"
+#define DEFAULT_PYCAN_BRIDGE_SCRIPT    "client_demo/tools/pycan_bridge.py"
 #define DEFAULT_PYCAN_INTERFACE        "gs_usb"
 #define DEFAULT_PYCAN_CHANNEL          "0"
 #define DEFAULT_PYCAN_HOST             "127.0.0.1"
