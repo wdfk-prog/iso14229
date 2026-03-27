@@ -200,6 +200,42 @@ def validate_can_mode(interface_name: str, use_canfd: bool, use_brs: bool) -> No
 
 
 
+def _maybe_attach_gs_usb_backend(kwargs: Dict[str, Any]) -> None:
+    """Attach the same libusb backend path used by the standalone smoke tool.
+
+    Task 3 already depends on ``libusb-package`` on Windows so that PyUSB can
+    discover a bundled libusb-1.0 backend without asking the user to install a
+    system-wide DLL manually. Task 4 must reuse that exact path; otherwise the
+    bridge/runtime path falls back to PyUSB's default backend discovery and can
+    fail with ``usb.core.NoBackendError: No backend available`` even though the
+    standalone smoke probe succeeded earlier.
+    """
+
+    try:
+        import usb.backend.libusb1  # type: ignore
+    except Exception:
+        return
+
+    backend = None
+    try:
+        import libusb_package  # type: ignore
+
+        get_backend = getattr(libusb_package, "get_libusb1_backend", None)
+        if callable(get_backend):
+            backend = get_backend()
+
+        if backend is None:
+            find_library = getattr(libusb_package, "find_library", None)
+            if find_library is not None:
+                backend = usb.backend.libusb1.get_backend(find_library=find_library)
+    except Exception:
+        backend = None
+
+    if backend is not None:
+        kwargs["backend"] = backend
+
+
+
 def open_can_bus(options: BusOpenOptions):
     can = load_python_can()
     interface_name = normalize_interface_name(options.interface_name)
@@ -212,6 +248,7 @@ def open_can_bus(options: BusOpenOptions):
 
     if interface_name == "gs_usb":
         kwargs["channel"] = coerce_gs_usb_channel(options.channel_name)
+        _maybe_attach_gs_usb_backend(kwargs)
     elif interface_name == "slcan":
         channel = options.channel_name.strip()
         if channel == "":

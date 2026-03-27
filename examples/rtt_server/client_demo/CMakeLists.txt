@@ -5,7 +5,7 @@ project(client_demo LANGUAGES C)
 option(ENABLE_DOWNLOAD "Enable deploy/run helper target (Linux only)" OFF)
 option(UDS_ENABLE_WINDOWS "Enable Windows / MSYS2 MINGW64 build skeleton" OFF)
 set(UDS_WIN_BACKEND "TSMASTER_API" CACHE STRING "Windows backend")
-set_property(CACHE UDS_WIN_BACKEND PROPERTY STRINGS TSMASTER_API)
+set_property(CACHE UDS_WIN_BACKEND PROPERTY STRINGS TSMASTER_API PYCAN_BRIDGE)
 set(UDS_WIN_ARCH "x64" CACHE STRING "Windows target arch")
 set_property(CACHE UDS_WIN_ARCH PROPERTY STRINGS x64)
 set(UDS_TSMASTER_SDK_DIR "" CACHE PATH "Path to TSMaster SDK root (for example D:/TOSUN/TSMaster/Data/SDK)")
@@ -158,97 +158,113 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         )
     endif()
 
-    if(NOT UDS_WIN_BACKEND STREQUAL "TSMASTER_API")
-        message(FATAL_ERROR "Task 6B currently fixes UDS_WIN_BACKEND to TSMASTER_API.")
+    if(NOT UDS_WIN_BACKEND STREQUAL "TSMASTER_API" AND NOT UDS_WIN_BACKEND STREQUAL "PYCAN_BRIDGE")
+        message(FATAL_ERROR "Unsupported UDS_WIN_BACKEND. Expected TSMASTER_API or PYCAN_BRIDGE.")
     endif()
 
     if(NOT UDS_WIN_ARCH STREQUAL "x64")
         message(FATAL_ERROR "Task 6B currently fixes UDS_WIN_ARCH to x64.")
     endif()
 
-    if(UDS_TSMASTER_SDK_DIR STREQUAL "")
-        message(FATAL_ERROR
-            "UDS_TSMASTER_SDK_DIR is required for the Windows skeleton.\n"
-            "Example: -DUDS_TSMASTER_SDK_DIR=D:/TOSUN/TSMaster/Data/SDK"
+    set(WINDOWS_TRANSPORT_SOURCE transport/transport_tsmaster_api.c)
+    set(WINDOWS_TRANSPORT_LIBS "")
+    set(WINDOWS_TRANSPORT_DEFS
+        UDS_WINDOWS_BUILD
+        UDS_WIN_ARCH_X64
+        UDS_TP_ISOTP_C
+        UDS_CUSTOM_MILLIS=1
+    )
+
+    if(UDS_WIN_BACKEND STREQUAL "TSMASTER_API")
+        if(UDS_TSMASTER_SDK_DIR STREQUAL "")
+            message(FATAL_ERROR
+                "UDS_TSMASTER_SDK_DIR is required when UDS_WIN_BACKEND=TSMASTER_API.\n"
+                "Example: -DUDS_TSMASTER_SDK_DIR=D:/TOSUN/TSMaster/Data/SDK"
+            )
+        endif()
+
+        set(_tsmaster_search_paths
+            "${UDS_TSMASTER_SDK_DIR}/lib/${UDS_WIN_ARCH}"
+            "${UDS_TSMASTER_SDK_DIR}/${UDS_WIN_ARCH}"
+            "${UDS_TSMASTER_SDK_DIR}"
         )
-    endif()
 
-    set(_tsmaster_search_paths
-        "${UDS_TSMASTER_SDK_DIR}/lib/${UDS_WIN_ARCH}"
-        "${UDS_TSMASTER_SDK_DIR}/${UDS_WIN_ARCH}"
-        "${UDS_TSMASTER_SDK_DIR}"
-    )
-
-    find_path(UDS_TSMASTER_INCLUDE_DIR
-        NAMES TSMaster.h
-        PATHS ${_tsmaster_search_paths}
-        NO_DEFAULT_PATH
-    )
-    find_file(UDS_TSMASTER_IMPORT_LIB
-        NAMES TSMaster.lib
-        PATHS ${_tsmaster_search_paths}
-        NO_DEFAULT_PATH
-    )
-
-    if(NOT UDS_TSMASTER_INCLUDE_DIR OR NOT UDS_TSMASTER_IMPORT_LIB)
-        message(FATAL_ERROR
-            "Failed to locate TSMaster.h / TSMaster.lib under ${UDS_TSMASTER_SDK_DIR}.\n"
-            "Expected a layout like <SDK>/lib/x64/TSMaster.h and <SDK>/lib/x64/TSMaster.lib."
+        find_path(UDS_TSMASTER_INCLUDE_DIR
+            NAMES TSMaster.h
+            PATHS ${_tsmaster_search_paths}
+            NO_DEFAULT_PATH
         )
+        find_file(UDS_TSMASTER_IMPORT_LIB
+            NAMES TSMaster.lib
+            PATHS ${_tsmaster_search_paths}
+            NO_DEFAULT_PATH
+        )
+
+        if(NOT UDS_TSMASTER_INCLUDE_DIR OR NOT UDS_TSMASTER_IMPORT_LIB)
+            message(FATAL_ERROR
+                "Failed to locate TSMaster.h / TSMaster.lib under ${UDS_TSMASTER_SDK_DIR}.\n"
+                "Expected a layout like <SDK>/lib/x64/TSMaster.h and <SDK>/lib/x64/TSMaster.lib."
+            )
+        endif()
+
+        get_filename_component(UDS_TSMASTER_IMPORT_LIB_DIR "${UDS_TSMASTER_IMPORT_LIB}" DIRECTORY)
+        set(UDS_TSMASTER_DLL_HINT_PATH "${UDS_TSMASTER_IMPORT_LIB_DIR}/TSMaster.dll")
+        set(UDS_TSMASTER_DLL_HINT_PATH_ALT "${UDS_TSMASTER_SDK_DIR}/TSMaster.dll")
+
+        add_library(tsmaster_sdk INTERFACE)
+        add_library(client_demo::tsmaster_sdk ALIAS tsmaster_sdk)
+        target_include_directories(tsmaster_sdk
+            INTERFACE
+                "${UDS_TSMASTER_INCLUDE_DIR}"
+        )
+        target_link_libraries(tsmaster_sdk
+            INTERFACE
+                "${UDS_TSMASTER_IMPORT_LIB}"
+        )
+        target_compile_definitions(tsmaster_sdk
+            INTERFACE
+                UDS_TRANSPORT_ENABLE_TSMASTER
+                UDS_WINDOWS_BUILD
+                UDS_WINDOWS_TSMaster_API
+                UDS_WIN_ARCH_X64
+                UDS_TSMASTER_DLL_HINT_PATH="${UDS_TSMASTER_DLL_HINT_PATH}"
+                UDS_TSMASTER_DLL_HINT_PATH_ALT="${UDS_TSMASTER_DLL_HINT_PATH_ALT}"
+        )
+
+        list(APPEND WINDOWS_TRANSPORT_LIBS client_demo::tsmaster_sdk)
+        list(APPEND WINDOWS_TRANSPORT_DEFS UDS_TRANSPORT_ENABLE_TSMASTER UDS_WINDOWS_TSMaster_API)
+        message(STATUS "Configuring Windows / MSYS2 MINGW64 skeleton (TSMASTER_API)")
+        message(STATUS "TSMaster include dir: ${UDS_TSMASTER_INCLUDE_DIR}")
+        message(STATUS "TSMaster import lib: ${UDS_TSMASTER_IMPORT_LIB}")
+    elseif(UDS_WIN_BACKEND STREQUAL "PYCAN_BRIDGE")
+        set(WINDOWS_TRANSPORT_SOURCE transport/transport_pycan_bridge.c)
+        list(APPEND WINDOWS_TRANSPORT_LIBS ws2_32)
+        list(APPEND WINDOWS_TRANSPORT_DEFS UDS_TRANSPORT_ENABLE_PYCAN_BRIDGE UDS_ENABLE_PYCAN_BRIDGE)
+        message(STATUS "Configuring Windows / MSYS2 MINGW64 skeleton (PYCAN_BRIDGE)")
     endif()
-
-    get_filename_component(UDS_TSMASTER_IMPORT_LIB_DIR "${UDS_TSMASTER_IMPORT_LIB}" DIRECTORY)
-    set(UDS_TSMASTER_DLL_HINT_PATH "${UDS_TSMASTER_IMPORT_LIB_DIR}/TSMaster.dll")
-    set(UDS_TSMASTER_DLL_HINT_PATH_ALT "${UDS_TSMASTER_SDK_DIR}/TSMaster.dll")
-
-    add_library(tsmaster_sdk INTERFACE)
-    add_library(client_demo::tsmaster_sdk ALIAS tsmaster_sdk)
-    target_include_directories(tsmaster_sdk
-        INTERFACE
-            "${UDS_TSMASTER_INCLUDE_DIR}"
-    )
-    target_link_libraries(tsmaster_sdk
-        INTERFACE
-            "${UDS_TSMASTER_IMPORT_LIB}"
-    )
-    target_compile_definitions(tsmaster_sdk
-        INTERFACE
-            UDS_TRANSPORT_ENABLE_TSMASTER
-            UDS_WINDOWS_BUILD
-            UDS_WINDOWS_TSMaster_API
-            UDS_WIN_ARCH_X64
-            UDS_TSMASTER_DLL_HINT_PATH="${UDS_TSMASTER_DLL_HINT_PATH}"
-            UDS_TSMASTER_DLL_HINT_PATH_ALT="${UDS_TSMASTER_DLL_HINT_PATH_ALT}"
-    )
 
     if(UDS_BUILD_WINDOWS_SMOKE)
         add_executable(client_smoke
             platform/windows_smoke_main.c
             platform/platform_windows.c
             transport/transport.c
-            transport/transport_tsmaster_api.c
+            ${WINDOWS_TRANSPORT_SOURCE}
             ../iso14229.c
         )
         add_executable(client_demo::client_smoke ALIAS client_smoke)
         client_demo_apply_common_settings(client_smoke)
-        target_link_libraries(client_smoke
-            PRIVATE
-                client_demo::tsmaster_sdk
-        )
+        if(WINDOWS_TRANSPORT_LIBS)
+            target_link_libraries(client_smoke
+                PRIVATE
+                    ${WINDOWS_TRANSPORT_LIBS}
+            )
+        endif()
         target_compile_definitions(client_smoke
             PRIVATE
-                UDS_TRANSPORT_ENABLE_TSMASTER
-                UDS_WINDOWS_BUILD
-                UDS_WINDOWS_TSMaster_API
-                UDS_WIN_ARCH_X64
-                UDS_TP_ISOTP_C
-                UDS_CUSTOM_MILLIS=1
+                ${WINDOWS_TRANSPORT_DEFS}
         )
     endif()
 
-    message(STATUS "Configuring Windows / MSYS2 MINGW64 skeleton")
-    message(STATUS "TSMaster include dir: ${UDS_TSMASTER_INCLUDE_DIR}")
-    message(STATUS "TSMaster import lib: ${UDS_TSMASTER_IMPORT_LIB}")
 else()
     message(FATAL_ERROR "Unsupported target system: ${CMAKE_SYSTEM_NAME}")
 endif()

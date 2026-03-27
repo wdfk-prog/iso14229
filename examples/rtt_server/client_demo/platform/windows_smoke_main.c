@@ -547,7 +547,6 @@ int main(void)
 {
     uds_transport_t tp;
     unsigned char storage[UDS_TRANSPORT_STORAGE_CAPACITY];
-    uds_transport_tsmaster_cfg_t backend_cfg;
     uds_transport_open_cfg_t open_cfg;
     smoke_settings_t smoke_cfg;
     int rc;
@@ -556,67 +555,124 @@ int main(void)
     smoke_try_load_default_conf(&smoke_cfg);
     smoke_settings_apply_env(&smoke_cfg);
 
-    backend_cfg.app_name = smoke_cfg.app_name;
-    backend_cfg.hw_device_name = smoke_cfg.hw_device_name;
-    backend_cfg.app_channel_index = smoke_cfg.app_channel_index;
-    backend_cfg.hw_device_type = smoke_cfg.hw_device_type;
-    backend_cfg.hw_device_sub_type = smoke_cfg.hw_device_sub_type;
-    backend_cfg.hw_index = smoke_cfg.hw_index;
-    backend_cfg.hw_channel_index = smoke_cfg.hw_channel_index;
-    backend_cfg.can_baudrate_kbps = smoke_cfg.can_baudrate_kbps;
-    backend_cfg.canfd_arb_baudrate_kbps = smoke_cfg.canfd_arb_baudrate_kbps;
-    backend_cfg.canfd_data_baudrate_kbps = smoke_cfg.canfd_data_baudrate_kbps;
-    backend_cfg.use_canfd = smoke_cfg.use_canfd != 0;
-    backend_cfg.use_brs = smoke_cfg.use_brs != 0;
-    backend_cfg.install_term_resistor = smoke_cfg.install_term_resistor != 0;
-    backend_cfg.use_extended_ids = smoke_cfg.use_extended_ids != 0;
-
-    open_cfg.backend = UDS_TRANSPORT_BACKEND_TSMASTER;
+    memset(&open_cfg, 0, sizeof(open_cfg));
     open_cfg.phys_sa = smoke_cfg.phys_rx_id;
     open_cfg.phys_ta = smoke_cfg.phys_tx_id;
     open_cfg.func_sa = smoke_cfg.func_tx_id;
-    open_cfg.backend_cfg = &backend_cfg;
 
-    uds_transport_init(&tp);
-    rc = uds_transport_bind_storage(&tp, storage, sizeof(storage));
-    if (rc != 0) {
-        fprintf(stderr, "[client_smoke] bind_storage failed rc=%d\n", rc);
-        return 1;
-    }
+#if defined(UDS_TRANSPORT_ENABLE_PYCAN_BRIDGE)
+    {
+        uds_transport_pycan_bridge_cfg_t backend_cfg;
+        memset(&backend_cfg, 0, sizeof(backend_cfg));
+        backend_cfg.python_exe = "python";
+        backend_cfg.bridge_script = "tools/pycan_bridge.py";
+        backend_cfg.interface_name = "gs_usb";
+        backend_cfg.channel_name = "0";
+        backend_cfg.host = "127.0.0.1";
+        backend_cfg.port = 29536U;
+        backend_cfg.bitrate = 500000U;
+        backend_cfg.rx_queue_capacity = 256U;
+        backend_cfg.open_timeout_ms = 4000U;
+        backend_cfg.io_timeout_ms = 250U;
+        backend_cfg.auto_spawn = true;
+        backend_cfg.use_canfd = smoke_cfg.use_canfd != 0;
+        backend_cfg.use_brs = smoke_cfg.use_brs != 0;
+        backend_cfg.use_extended_ids = smoke_cfg.use_extended_ids != 0;
+        backend_cfg.ipc_mode = UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL;
 
-    printf("[client_smoke] Windows smoke starting\n");
-    printf("[client_smoke] backend=TSMASTER_API arch=x64 tick_ms=%u\n", platform_tick_ms());
-    if (smoke_cfg.conf_loaded) {
-        printf("[client_smoke] conf=%s\n", smoke_cfg.conf_path);
-    } else {
-        printf("[client_smoke] conf=(not loaded, using defaults/env)\n");
-    }
-    printf("[client_smoke] app=%s hw=%s app_ch=%u hw_type=%d hw_sub=%d hw_idx=%d hw_ch=%d\n",
-           backend_cfg.app_name,
-           backend_cfg.hw_device_name,
-           (unsigned)backend_cfg.app_channel_index,
-           (int)backend_cfg.hw_device_type,
-           (int)backend_cfg.hw_device_sub_type,
-           (int)backend_cfg.hw_index,
-           (int)backend_cfg.hw_channel_index);
-    printf("[client_smoke] ids phys_rx=0x%X phys_tx=0x%X func_tx=0x%X canfd=%d brs=%d ext=%d term=%d baud=%.1f\n",
-           (unsigned)open_cfg.phys_sa,
-           (unsigned)open_cfg.phys_ta,
-           (unsigned)open_cfg.func_sa,
-           backend_cfg.use_canfd ? 1 : 0,
-           backend_cfg.use_brs ? 1 : 0,
-           backend_cfg.use_extended_ids ? 1 : 0,
-           backend_cfg.install_term_resistor ? 1 : 0,
-           backend_cfg.can_baudrate_kbps);
+        open_cfg.backend = UDS_TRANSPORT_BACKEND_PYCAN_BRIDGE;
+        open_cfg.backend_cfg = &backend_cfg;
 
-    rc = uds_transport_open(&tp, &open_cfg);
-    if (rc != 0) {
-        fprintf(stderr, "[client_smoke] transport open failed rc=%d last_error=%d\n",
-                rc,
-                uds_transport_get_last_error(&tp));
-        fprintf(stderr, "[client_smoke] tip: set UDS_TSMASTER_DLL_PATH or check mapping/hardware state in TSMaster\n");
-        return 2;
+        uds_transport_init(&tp);
+        rc = uds_transport_bind_storage(&tp, storage, sizeof(storage));
+        if (rc != 0) {
+            fprintf(stderr, "[client_smoke] bind_storage failed rc=%d\n", rc);
+            return 1;
+        }
+
+        printf("[client_smoke] Windows smoke starting\n");
+        printf("[client_smoke] backend=PYCAN_BRIDGE arch=x64 tick_ms=%u\n", platform_tick_ms());
+        printf("[client_smoke] pycan if=%s channel=%s bitrate=%u auto_spawn=%d ext=%d canfd=%d brs=%d\n",
+               backend_cfg.interface_name,
+               backend_cfg.channel_name,
+               (unsigned)backend_cfg.bitrate,
+               backend_cfg.auto_spawn ? 1 : 0,
+               backend_cfg.use_extended_ids ? 1 : 0,
+               backend_cfg.use_canfd ? 1 : 0,
+               backend_cfg.use_brs ? 1 : 0);
+
+        rc = uds_transport_open(&tp, &open_cfg);
+        if (rc != 0) {
+            fprintf(stderr, "[client_smoke] transport open failed rc=%d last_error=%d\n",
+                    rc,
+                    uds_transport_get_last_error(&tp));
+            fprintf(stderr, "[client_smoke] tip: ensure python and tools/pycan_bridge.py are reachable, and install python-can dependencies\n");
+            return 2;
+        }
     }
+#else
+    {
+        uds_transport_tsmaster_cfg_t backend_cfg;
+        backend_cfg.app_name = smoke_cfg.app_name;
+        backend_cfg.hw_device_name = smoke_cfg.hw_device_name;
+        backend_cfg.app_channel_index = smoke_cfg.app_channel_index;
+        backend_cfg.hw_device_type = smoke_cfg.hw_device_type;
+        backend_cfg.hw_device_sub_type = smoke_cfg.hw_device_sub_type;
+        backend_cfg.hw_index = smoke_cfg.hw_index;
+        backend_cfg.hw_channel_index = smoke_cfg.hw_channel_index;
+        backend_cfg.can_baudrate_kbps = smoke_cfg.can_baudrate_kbps;
+        backend_cfg.canfd_arb_baudrate_kbps = smoke_cfg.canfd_arb_baudrate_kbps;
+        backend_cfg.canfd_data_baudrate_kbps = smoke_cfg.canfd_data_baudrate_kbps;
+        backend_cfg.use_canfd = smoke_cfg.use_canfd != 0;
+        backend_cfg.use_brs = smoke_cfg.use_brs != 0;
+        backend_cfg.install_term_resistor = smoke_cfg.install_term_resistor != 0;
+        backend_cfg.use_extended_ids = smoke_cfg.use_extended_ids != 0;
+
+        open_cfg.backend = UDS_TRANSPORT_BACKEND_TSMASTER;
+        open_cfg.backend_cfg = &backend_cfg;
+
+        uds_transport_init(&tp);
+        rc = uds_transport_bind_storage(&tp, storage, sizeof(storage));
+        if (rc != 0) {
+            fprintf(stderr, "[client_smoke] bind_storage failed rc=%d\n", rc);
+            return 1;
+        }
+
+        printf("[client_smoke] Windows smoke starting\n");
+        printf("[client_smoke] backend=TSMASTER_API arch=x64 tick_ms=%u\n", platform_tick_ms());
+        if (smoke_cfg.conf_loaded) {
+            printf("[client_smoke] conf=%s\n", smoke_cfg.conf_path);
+        } else {
+            printf("[client_smoke] conf=(not loaded, using defaults/env)\n");
+        }
+        printf("[client_smoke] app=%s hw=%s app_ch=%u hw_type=%d hw_sub=%d hw_idx=%d hw_ch=%d\n",
+               backend_cfg.app_name,
+               backend_cfg.hw_device_name,
+               (unsigned)backend_cfg.app_channel_index,
+               (int)backend_cfg.hw_device_type,
+               (int)backend_cfg.hw_device_sub_type,
+               (int)backend_cfg.hw_index,
+               (int)backend_cfg.hw_channel_index);
+        printf("[client_smoke] ids phys_rx=0x%X phys_tx=0x%X func_tx=0x%X canfd=%d brs=%d ext=%d term=%d baud=%.1f\n",
+               (unsigned)open_cfg.phys_sa,
+               (unsigned)open_cfg.phys_ta,
+               (unsigned)open_cfg.func_sa,
+               backend_cfg.use_canfd ? 1 : 0,
+               backend_cfg.use_brs ? 1 : 0,
+               backend_cfg.use_extended_ids ? 1 : 0,
+               backend_cfg.install_term_resistor ? 1 : 0,
+               backend_cfg.can_baudrate_kbps);
+
+        rc = uds_transport_open(&tp, &open_cfg);
+        if (rc != 0) {
+            fprintf(stderr, "[client_smoke] transport open failed rc=%d last_error=%d\n",
+                    rc,
+                    uds_transport_get_last_error(&tp));
+            fprintf(stderr, "[client_smoke] tip: set UDS_TSMASTER_DLL_PATH or check mapping/hardware state in TSMaster\n");
+            return 2;
+        }
+    }
+#endif
 
     printf("[client_smoke] transport open succeeded\n");
     rc = uds_transport_poll(&tp);
@@ -626,3 +682,4 @@ int main(void)
     printf("[client_smoke] transport closed cleanly\n");
     return 0;
 }
+
