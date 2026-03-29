@@ -33,10 +33,14 @@
 #define SMOKE_DEFAULT_PYCAN_CH     "0"
 #define SMOKE_DEFAULT_PYCAN_HOST   "127.0.0.1"
 #define SMOKE_DEFAULT_PYCAN_PORT   29536u
-#define SMOKE_DEFAULT_PYCAN_BITRATE 500000u
+#define SMOKE_DEFAULT_PYCAN_BITRATE 1000000u
 #define SMOKE_DEFAULT_PYCAN_RXQ    256u
 #define SMOKE_DEFAULT_PYCAN_OPEN_TIMEOUT_MS 4000u
 #define SMOKE_DEFAULT_PYCAN_IO_TIMEOUT_MS   250u
+#define SMOKE_DEFAULT_SESSION_ID            0x03u
+#define SMOKE_DEFAULT_SESSION_REPEAT        3u
+#define SMOKE_DEFAULT_SESSION_TIMEOUT_MS    2000u
+#define SMOKE_DEFAULT_SESSION_GAP_MS        200u
 
 #define SMOKE_MAX_NAME_LEN         64u
 #define SMOKE_MAX_PATH_LEN         260u
@@ -74,8 +78,22 @@ typedef struct {
     int use_extended_ids;
     int pycan_auto_spawn;
     int pycan_debug_tcp_mode;
+    int run_session_smoke;
+    uint32_t session_id;
+    uint32_t session_repeat;
+    uint32_t session_timeout_ms;
+    uint32_t session_gap_ms;
     int conf_loaded;
 } smoke_settings_t;
+
+typedef struct {
+    volatile int response_done;
+    uint8_t expected_session;
+    uint8_t response_sid;
+    uint8_t response_subfn;
+    uint8_t last_nrc;
+    UDSErr_t last_err;
+} smoke_session_state_t;
 
 static void smoke_copy_string(char *dst, size_t dst_size, const char *src)
 {
@@ -264,6 +282,21 @@ static int smoke_read_float_env(const char *name, float *out_value)
     return smoke_parse_float_text(value, out_value);
 }
 
+static int smoke_parse_hex_byte_text(const char *value, uint32_t *out_value)
+{
+    uint32_t parsed;
+
+    if (!smoke_parse_u32_text(value, &parsed)) {
+        return 0;
+    }
+    if (parsed == 0u || parsed > 0x7Fu) {
+        return 0;
+    }
+
+    *out_value = parsed;
+    return 1;
+}
+
 static int smoke_parse_tcp_port_text(const char *value, uint32_t *out_value)
 {
     uint32_t parsed;
@@ -315,6 +348,11 @@ static void smoke_settings_init_defaults(smoke_settings_t *cfg)
     cfg->use_extended_ids = 0;
     cfg->pycan_auto_spawn = 1;
     cfg->pycan_debug_tcp_mode = 0;
+    cfg->run_session_smoke = 0;
+    cfg->session_id = SMOKE_DEFAULT_SESSION_ID;
+    cfg->session_repeat = SMOKE_DEFAULT_SESSION_REPEAT;
+    cfg->session_timeout_ms = SMOKE_DEFAULT_SESSION_TIMEOUT_MS;
+    cfg->session_gap_ms = SMOKE_DEFAULT_SESSION_GAP_MS;
     cfg->conf_loaded = 0;
 }
 
@@ -427,6 +465,22 @@ static void smoke_settings_apply_env(smoke_settings_t *cfg)
     }
     if (smoke_read_bool_env("UDS_SMOKE_PYCAN_DEBUG_TCP", &bool_value)) {
         cfg->pycan_debug_tcp_mode = bool_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_RUN_SESSION", &bool_value)) {
+        cfg->run_session_smoke = bool_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SESSION_REPEAT", &u32_value) && u32_value > 0u) {
+        cfg->session_repeat = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SESSION_TIMEOUT_MS", &u32_value) && u32_value > 0u) {
+        cfg->session_timeout_ms = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SESSION_GAP_MS", &u32_value)) {
+        cfg->session_gap_ms = u32_value;
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_SESSION_ID");
+    if (value != NULL && smoke_parse_hex_byte_text(value, &u32_value)) {
+        cfg->session_id = u32_value;
     }
 }
 
@@ -623,6 +677,41 @@ static int smoke_apply_conf_kv(smoke_settings_t *cfg, const char *key, const cha
         }
         return 0;
     }
+    if (strcmp(key, "run_session_smoke") == 0 || strcmp(key, "session_smoke") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->run_session_smoke = bool_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "session_id") == 0) {
+        if (smoke_parse_hex_byte_text(value, &u32_value)) {
+            cfg->session_id = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "session_repeat") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->session_repeat = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "session_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->session_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "session_gap_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->session_gap_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
 
     return 0;
 }
@@ -705,6 +794,166 @@ static void smoke_try_load_default_conf(smoke_settings_t *cfg)
     if (!smoke_try_load_conf(cfg, "./client_smoke.conf")) {
         (void)smoke_try_load_conf(cfg, "./tsmaster_smoke.conf");
     }
+}
+
+static void smoke_session_state_reset(smoke_session_state_t *state, uint8_t expected_session)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->expected_session = expected_session;
+    state->last_err = UDS_OK;
+}
+
+static UDSErr_t smoke_session_event_handler(UDSClient_t *client, UDSEvent_t evt, void *ev_data)
+{
+    smoke_session_state_t *state;
+
+    if (client == NULL || client->fn_data == NULL) {
+        return UDS_OK;
+    }
+
+    state = (smoke_session_state_t *)client->fn_data;
+
+    switch (evt) {
+    case UDS_EVT_ResponseReceived:
+        if (client->recv_size < 2u) {
+            state->last_err = UDS_ERR_RESP_TOO_SHORT;
+        } else {
+            state->response_sid = client->recv_buf[0];
+            state->response_subfn = client->recv_buf[1];
+
+            if (state->response_sid != 0x50u) {
+                state->last_err = UDS_ERR_SID_MISMATCH;
+            } else if (state->response_subfn != state->expected_session) {
+                state->last_err = UDS_ERR_SUBFUNCTION_MISMATCH;
+            } else {
+                state->last_err = UDS_OK;
+            }
+        }
+        state->response_done = 1;
+        break;
+
+    case UDS_EVT_Err:
+        if (ev_data != NULL) {
+            state->last_err = *(const UDSErr_t *)ev_data;
+            if (((unsigned)state->last_err & 0xFF00u) == 0u) {
+                state->last_nrc = (uint8_t)state->last_err;
+            } else {
+                state->last_nrc = 0u;
+            }
+        } else {
+            state->last_err = UDS_ERR_TPORT;
+        }
+        state->response_done = 1;
+        break;
+
+    default:
+        break;
+    }
+
+    return UDS_OK;
+}
+
+static int smoke_wait_for_session_result(UDSClient_t *client, smoke_session_state_t *state, uint32_t timeout_ms)
+{
+    uint32_t start_ms;
+
+    if (client == NULL || state == NULL || timeout_ms == 0u) {
+        return -1;
+    }
+
+    start_ms = platform_tick_ms();
+    while (!state->response_done) {
+        (void)UDSClientPoll(client);
+        if (state->response_done) {
+            break;
+        }
+        if ((platform_tick_ms() - start_ms) > timeout_ms) {
+            state->last_err = UDS_ERR_TIMEOUT;
+            return -1;
+        }
+        platform_sleep_ms(1u);
+    }
+
+    return (state->last_err == UDS_OK) ? 0 : -1;
+}
+
+static int smoke_run_session_sequence(uds_transport_t *tp, const smoke_settings_t *cfg)
+{
+    UDSClient_t client;
+    smoke_session_state_t state;
+    UDSErr_t err;
+    uint32_t attempt;
+
+    if (tp == NULL || cfg == NULL) {
+        return -1;
+    }
+
+    memset(&client, 0, sizeof(client));
+    smoke_session_state_reset(&state, (uint8_t)cfg->session_id);
+
+    err = UDSClientInit(&client);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] UDSClientInit failed err=%d\n", (int)err);
+        return -1;
+    }
+
+    client.tp = uds_transport_get_tp_handle(tp);
+    client.fn = smoke_session_event_handler;
+    client.fn_data = &state;
+
+    if (client.tp == NULL) {
+        fprintf(stderr, "[client_smoke] transport handle is NULL\n");
+        return -1;
+    }
+
+    printf("[client_smoke] session smoke enabled sid=0x%02X repeat=%lu timeout_ms=%lu gap_ms=%lu\n",
+           (unsigned)cfg->session_id,
+           (unsigned long)cfg->session_repeat,
+           (unsigned long)cfg->session_timeout_ms,
+           (unsigned long)cfg->session_gap_ms);
+
+    for (attempt = 0u; attempt < cfg->session_repeat; ++attempt) {
+        smoke_session_state_reset(&state, (uint8_t)cfg->session_id);
+        err = UDSSendDiagSessCtrl(&client, (uint8_t)cfg->session_id);
+        if (err != UDS_OK) {
+            fprintf(stderr,
+                    "[client_smoke] session attempt %lu/%lu send failed err=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->session_repeat,
+                    (int)err);
+            return -1;
+        }
+
+        if (smoke_wait_for_session_result(&client, &state, cfg->session_timeout_ms) != 0) {
+            fprintf(stderr,
+                    "[client_smoke] session attempt %lu/%lu failed err=%d nrc=0x%02X resp_sid=0x%02X resp_sub=0x%02X last_error=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->session_repeat,
+                    (int)state.last_err,
+                    state.last_nrc,
+                    state.response_sid,
+                    state.response_subfn,
+                    uds_transport_get_last_error(tp));
+            return -1;
+        }
+
+        printf("[client_smoke] session attempt %lu/%lu ok sid=0x%02X resp_sid=0x%02X resp_sub=0x%02X\n",
+               (unsigned long)(attempt + 1u),
+               (unsigned long)cfg->session_repeat,
+               (unsigned)cfg->session_id,
+               state.response_sid,
+               state.response_subfn);
+
+        if (attempt + 1u < cfg->session_repeat && cfg->session_gap_ms > 0u) {
+            platform_sleep_ms(cfg->session_gap_ms);
+        }
+    }
+
+    return 0;
 }
 
 int main(void)
@@ -845,8 +1094,12 @@ int main(void)
     rc = uds_transport_poll(&tp);
     printf("[client_smoke] first poll rc=%d last_error=%d\n", rc, uds_transport_get_last_error(&tp));
 
+    if (rc == 0 && smoke_cfg.run_session_smoke) {
+        rc = smoke_run_session_sequence(&tp, &smoke_cfg);
+    }
+
     uds_transport_close(&tp);
     printf("[client_smoke] transport closed cleanly\n");
-    return 0;
+    return (rc == 0) ? 0 : 3;
 }
 

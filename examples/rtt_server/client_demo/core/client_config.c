@@ -177,8 +177,8 @@ static void print_usage(const char *prog_name)
     printf("      --no-auto-spawn        Do not spawn the Python sidecar from the C client\n");
     printf("\nExamples:\n");
     printf("  %s -b socketcan -i vcan0 -s 7E8 -t 7E0\n", prog_name);
-    printf("  %s -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 500000\n", prog_name);
-    printf("  %s -b pycan_bridge --py-if slcan --py-channel COM4@9600 --bitrate 500000\n", prog_name);
+    printf("  %s -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 1000000\n", prog_name);
+    printf("  %s -b pycan_bridge --py-if slcan --py-channel COM4@9600 --bitrate 1000000\n", prog_name);
 }
 
 static int validate_config(const client_runtime_config_t *cfg)

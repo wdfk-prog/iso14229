@@ -29,7 +29,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standalone python-can smoke test for canlight/candleLight adapters")
     parser.add_argument("--interface", default="gs_usb", choices=("gs_usb", "slcan"), help="python-can interface")
     parser.add_argument("--channel", default="0", help="gs_usb channel index or slcan port, e.g. COM4@9600")
-    parser.add_argument("--bitrate", type=int, default=500000, help="arbitration bitrate in bit/s")
+    parser.add_argument("--bitrate", type=int, default=1000000, help="arbitration bitrate in bit/s")
     parser.add_argument("--recv-timeout-ms", type=int, default=500, help="receive wait time after send")
     parser.add_argument("--send-id", default="7E0", help="CAN identifier for optional transmit test")
     parser.add_argument("--send-data", default="1003", help="hex payload for optional transmit test")
