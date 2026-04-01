@@ -26,7 +26,11 @@ extern "C" {
 #endif
 
 #define DEFAULT_CAN_IF                 "can1"
+#if defined(_WIN32) && defined(UDS_ENABLE_PYCAN_BRIDGE)
+#define DEFAULT_PYCAN_PYTHON_EXE       ".venv\\Scripts\\python.exe"
+#else
 #define DEFAULT_PYCAN_PYTHON_EXE       "python"
+#endif
 #define DEFAULT_PYCAN_BRIDGE_SCRIPT    "client_demo/tools/pycan_bridge.py"
 #define DEFAULT_PYCAN_INTERFACE        "gs_usb"
 #define DEFAULT_PYCAN_CHANNEL          "0"

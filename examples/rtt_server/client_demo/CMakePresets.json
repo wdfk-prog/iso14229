@@ -21,8 +21,8 @@
     },
     {
       "name": "windows-tsmaster-mingw64",
-      "displayName": "Windows / MSYS2 MINGW64 + TSMaster smoke",
-      "description": "Reads UDS_TSMASTER_SDK_DIR from the environment.",
+      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster smoke",
+      "description": "Historical fallback only. Reads UDS_TSMASTER_SDK_DIR from the environment.",
       "inherits": "windows-tsmaster-base",
       "cacheVariables": {
         "UDS_TSMASTER_SDK_DIR": "$env{UDS_TSMASTER_SDK_DIR}"
@@ -30,8 +30,8 @@
     },
     {
       "name": "windows-tsmaster-mingw64-inline-sdk",
-      "displayName": "Windows / MSYS2 MINGW64 + TSMaster smoke (inline SDK path)",
-      "description": "Edit UDS_TSMASTER_SDK_DIR below if you do not want to export it in the shell.",
+      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster smoke (inline SDK path)",
+      "description": "Historical fallback only. Edit UDS_TSMASTER_SDK_DIR below if you do not want to export it in the shell.",
       "inherits": "windows-tsmaster-base",
       "cacheVariables": {
         "UDS_TSMASTER_SDK_DIR": "D:/TOSUN/TSMaster/Data/SDK"
@@ -52,8 +52,8 @@
     },
     {
       "name": "windows-pycan-mingw64",
-      "displayName": "Windows / MSYS2 MINGW64 + pycan smoke",
-      "description": "Build the Windows smoke target with the PYCAN_BRIDGE backend.",
+      "displayName": "Windows / MSYS2 MINGW64 + pycan client",
+      "description": "Recommended preset. Builds the formal client target with the PYCAN_BRIDGE backend; client_smoke stays available for layered verification.",
       "inherits": "windows-pycan-base"
     }
   ],

@@ -129,6 +129,12 @@ _Static_assert(sizeof(uds_transport_pycan_ctx_t) <= UDS_TRANSPORT_STORAGE_CAPACI
 static UDSTpStatus_t pycan_intercepted_poll(struct UDSTp *hdl);
 
 static void pycan_copy_string(char *dst, size_t dst_size, const char *src, const char *fallback);
+static void pycan_canonicalize_existing_path(char *path, size_t path_size);
+static bool pycan_search_path_candidate(char *path, size_t path_size, const char *candidate);
+static bool pycan_try_module_relative_candidates(char *path,
+                                                 size_t path_size,
+                                                 const char *const *candidates,
+                                                 size_t candidate_count);
 
 static uds_transport_pycan_ctx_t *pycan_ctx(uds_transport_t *tp)
 {
@@ -179,6 +185,165 @@ static bool pycan_looks_like_path(const char *path)
            (strchr(path, '\\') != NULL || strchr(path, '/') != NULL || strchr(path, ':') != NULL);
 }
 
+static bool pycan_is_absolute_path(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+    if (path[0] == '\\' || path[0] == '/') {
+        return true;
+    }
+    return isalpha((unsigned char)path[0]) && path[1] == ':';
+}
+
+static bool pycan_get_module_dir(char *dst, size_t dst_size)
+{
+    DWORD rc;
+    char *slash_back;
+    char *slash_fwd;
+    char *slash;
+
+    if (dst == NULL || dst_size == 0U) {
+        return false;
+    }
+
+    rc = GetModuleFileNameA(NULL, dst, (DWORD)dst_size);
+    if (rc == 0U || rc >= dst_size) {
+        dst[0] = '\0';
+        return false;
+    }
+
+    slash_back = strrchr(dst, '\\');
+    slash_fwd = strrchr(dst, '/');
+    slash = slash_back;
+    if (slash == NULL || (slash_fwd != NULL && slash_fwd > slash)) {
+        slash = slash_fwd;
+    }
+    if (slash == NULL) {
+        dst[0] = '\0';
+        return false;
+    }
+
+    *slash = '\0';
+    return true;
+}
+
+static bool pycan_get_parent_dir(char *path)
+{
+    char *slash_back;
+    char *slash_fwd;
+    char *slash;
+
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+
+    slash_back = strrchr(path, '\\');
+    slash_fwd = strrchr(path, '/');
+    slash = slash_back;
+    if (slash == NULL || (slash_fwd != NULL && slash_fwd > slash)) {
+        slash = slash_fwd;
+    }
+    if (slash == NULL) {
+        return false;
+    }
+
+    *slash = '\0';
+    return path[0] != '\0';
+}
+
+static bool pycan_join_path(char *dst, size_t dst_size, const char *base, const char *tail)
+{
+    int rc;
+
+    if (dst == NULL || dst_size == 0U || base == NULL || tail == NULL ||
+        base[0] == '\0' || tail[0] == '\0') {
+        return false;
+    }
+
+    if (pycan_is_absolute_path(tail)) {
+        pycan_copy_string(dst, dst_size, tail, tail);
+        return true;
+    }
+
+    rc = snprintf(dst, dst_size, "%s\\%s", base, tail);
+    return rc > 0 && (size_t)rc < dst_size;
+}
+
+static bool pycan_try_candidate_from_dir(char *path, size_t path_size, const char *dir, const char *candidate)
+{
+    char joined[UDS_PYCAN_STR_LARGE];
+
+    if (dir == NULL || dir[0] == '\0' || candidate == NULL || candidate[0] == '\0') {
+        return false;
+    }
+    if (!pycan_join_path(joined, sizeof(joined), dir, candidate)) {
+        return false;
+    }
+    if (!pycan_file_exists(joined)) {
+        return false;
+    }
+
+    pycan_copy_string(path, path_size, joined, joined);
+    pycan_canonicalize_existing_path(path, path_size);
+    return true;
+}
+
+static bool pycan_search_path_candidate(char *path, size_t path_size, const char *candidate)
+{
+    char resolved[UDS_PYCAN_STR_LARGE];
+    DWORD rc;
+
+    if (path == NULL || path_size == 0U || candidate == NULL || candidate[0] == '\0') {
+        return false;
+    }
+
+    rc = SearchPathA(NULL, candidate, NULL, (DWORD)sizeof(resolved), resolved, NULL);
+    if (rc == 0U || rc >= sizeof(resolved) || !pycan_file_exists(resolved)) {
+        return false;
+    }
+
+    pycan_copy_string(path, path_size, resolved, resolved);
+    pycan_canonicalize_existing_path(path, path_size);
+    return true;
+}
+
+static bool pycan_try_module_relative_candidates(char *path,
+                                                 size_t path_size,
+                                                 const char *const *candidates,
+                                                 size_t candidate_count)
+{
+    char module_dir[UDS_PYCAN_STR_LARGE];
+    char parent_dir[UDS_PYCAN_STR_LARGE];
+    size_t i;
+
+    if (path == NULL || path_size == 0U || candidates == NULL || candidate_count == 0U) {
+        return false;
+    }
+    if (!pycan_get_module_dir(module_dir, sizeof(module_dir))) {
+        return false;
+    }
+
+    for (i = 0U; i < candidate_count; ++i) {
+        if (pycan_try_candidate_from_dir(path, path_size, module_dir, candidates[i])) {
+            return true;
+        }
+    }
+
+    pycan_copy_string(parent_dir, sizeof(parent_dir), module_dir, module_dir);
+    if (!pycan_get_parent_dir(parent_dir)) {
+        return false;
+    }
+
+    for (i = 0U; i < candidate_count; ++i) {
+        if (pycan_try_candidate_from_dir(path, path_size, parent_dir, candidates[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void pycan_canonicalize_existing_path(char *path, size_t path_size)
 {
     char full_path[UDS_PYCAN_STR_LARGE];
@@ -196,26 +361,65 @@ static void pycan_canonicalize_existing_path(char *path, size_t path_size)
     pycan_copy_string(path, path_size, full_path, full_path);
 }
 
+static bool pycan_is_known_python_default(const char *path)
+{
+    return path != NULL &&
+           (strcmp(path, ".venv\\Scripts\\python.exe") == 0 ||
+            strcmp(path, ".venv/Scripts/python.exe") == 0 ||
+            strcmp(path, "venv\\Scripts\\python.exe") == 0 ||
+            strcmp(path, "venv/Scripts/python.exe") == 0 ||
+            _stricmp(path, "python") == 0 ||
+            _stricmp(path, "python.exe") == 0);
+}
+
 static void pycan_resolve_python_exe(char *path, size_t path_size)
 {
-    char resolved[UDS_PYCAN_STR_LARGE];
-    DWORD rc;
+    static const char *const k_candidates[] = {
+        ".venv\\Scripts\\python.exe",
+        "venv\\Scripts\\python.exe",
+        "python.exe",
+        "python",
+    };
+    const char *candidate = path;
+    const char *single_candidate = NULL;
+    char relative_candidate[UDS_PYCAN_STR_LARGE];
+    size_t i;
 
-    if (path == NULL || path_size == 0U || path[0] == '\0') {
+    if (path == NULL || path_size == 0U) {
         return;
     }
 
-    if (pycan_looks_like_path(path) && pycan_file_exists(path)) {
+    if (pycan_file_exists(path)) {
         pycan_canonicalize_existing_path(path, path_size);
         return;
     }
 
-    rc = SearchPathA(NULL, path, NULL, (DWORD)sizeof(resolved), resolved, NULL);
-    if (rc == 0U || rc >= sizeof(resolved) || !pycan_file_exists(resolved)) {
+    if (path[0] != '\0' && !pycan_is_known_python_default(path)) {
+        pycan_copy_string(relative_candidate, sizeof(relative_candidate), path, path);
+        single_candidate = relative_candidate;
+        if (pycan_looks_like_path(relative_candidate) &&
+            pycan_try_module_relative_candidates(path, path_size, &single_candidate, 1U)) {
+            return;
+        }
+        if (pycan_search_path_candidate(path, path_size, candidate)) {
+            return;
+        }
         return;
     }
 
-    pycan_copy_string(path, path_size, resolved, resolved);
+    if (pycan_try_module_relative_candidates(path, path_size, k_candidates, ARRAYSIZE(k_candidates))) {
+        return;
+    }
+
+    for (i = 0U; i < ARRAYSIZE(k_candidates); ++i) {
+        if (pycan_search_path_candidate(path, path_size, k_candidates[i])) {
+            return;
+        }
+    }
+
+    if (path[0] == '\0') {
+        pycan_copy_string(path, path_size, k_candidates[0], k_candidates[0]);
+    }
 }
 
 static bool pycan_is_known_bridge_default(const char *path)
@@ -231,6 +435,8 @@ static void pycan_resolve_bridge_script(char *path, size_t path_size)
         "client_demo/tools/pycan_bridge.py",
         "tools/pycan_bridge.py",
     };
+    const char *single_candidate = NULL;
+    char relative_candidate[UDS_PYCAN_STR_LARGE];
     size_t i;
 
     if (path == NULL || path_size == 0U) {
@@ -243,6 +449,15 @@ static void pycan_resolve_bridge_script(char *path, size_t path_size)
     }
 
     if (path[0] != '\0' && !pycan_is_known_bridge_default(path)) {
+        pycan_copy_string(relative_candidate, sizeof(relative_candidate), path, path);
+        single_candidate = relative_candidate;
+        if (pycan_looks_like_path(relative_candidate) &&
+            pycan_try_module_relative_candidates(path, path_size, &single_candidate, 1U)) {
+            return;
+        }
+        if (pycan_search_path_candidate(path, path_size, relative_candidate)) {
+            return;
+        }
         return;
     }
 
@@ -250,6 +465,16 @@ static void pycan_resolve_bridge_script(char *path, size_t path_size)
         if (pycan_file_exists(k_candidates[i])) {
             pycan_copy_string(path, path_size, k_candidates[i], k_candidates[i]);
             pycan_canonicalize_existing_path(path, path_size);
+            return;
+        }
+    }
+
+    if (pycan_try_module_relative_candidates(path, path_size, k_candidates, ARRAYSIZE(k_candidates))) {
+        return;
+    }
+
+    for (i = 0U; i < ARRAYSIZE(k_candidates); ++i) {
+        if (pycan_search_path_candidate(path, path_size, k_candidates[i])) {
             return;
         }
     }

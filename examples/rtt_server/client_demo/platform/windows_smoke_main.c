@@ -29,7 +29,7 @@
 #define SMOKE_DEFAULT_CAN_BAUD     500.0f
 #define SMOKE_DEFAULT_CANFD_ARB    500.0f
 #define SMOKE_DEFAULT_CANFD_DATA   2000.0f
-#define SMOKE_DEFAULT_PYTHON_EXE   "python"
+#define SMOKE_DEFAULT_PYTHON_EXE   ".venv\\Scripts\\python.exe"
 #define SMOKE_DEFAULT_BRIDGE_SCRIPT "client_demo/tools/pycan_bridge.py"
 #define SMOKE_DEFAULT_PYCAN_IF     "gs_usb"
 #define SMOKE_DEFAULT_PYCAN_CH     "0"
