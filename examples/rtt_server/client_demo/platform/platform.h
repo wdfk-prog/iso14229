@@ -28,6 +28,29 @@ uint32_t platform_tick_ms(void);
 void platform_sleep_ms(uint32_t ms);
 
 /**
+ * @brief Prepare the console for interactive shell I/O.
+ *
+ * Implementations may enable VT output, switch stdin into character mode,
+ * and register restoration hooks. Platforms that do not need special setup
+ * should return success.
+ *
+ * @return 0 on success, -1 on failure.
+ */
+int platform_console_prepare_interactive(void);
+
+/**
+ * @brief Restore console state saved by platform_console_prepare_interactive().
+ */
+void platform_console_restore_interactive(void);
+
+/**
+ * @brief Report whether VT output sequences are available on the active console.
+ *
+ * @return 1 when VT output is enabled, 0 otherwise.
+ */
+int platform_console_supports_vt(void);
+
+/**
  * @brief Poll console input readiness on stdin.
  *
  * @param timeout_ms Timeout in milliseconds.

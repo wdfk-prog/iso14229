@@ -42,6 +42,21 @@ void platform_sleep_ms(uint32_t ms)
     }
 }
 
+
+int platform_console_prepare_interactive(void)
+{
+    return 0;
+}
+
+void platform_console_restore_interactive(void)
+{
+}
+
+int platform_console_supports_vt(void)
+{
+    return 1;
+}
+
 int platform_console_poll_input(uint32_t timeout_ms)
 {
     fd_set readfds;

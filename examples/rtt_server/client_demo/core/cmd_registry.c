@@ -94,7 +94,7 @@ int cmd_register(const char *name, cmd_handler_t handler, const char *help, cons
     }
     
     /* Validate input arguments */
-    if (name == NULL || handler == NULL) {
+    if (name == NULL) {
         return -1;
     }
 
@@ -157,6 +157,9 @@ int cmd_execute_line(char *input_line)
     /* Lookup and execute */
     for (i = 0; i < g_cmd_count; i++) {
         if (strcmp(argv[0], g_cmd_table[i].name) == 0) {
+            if (g_cmd_table[i].handler == NULL) {
+                return 0;
+            }
             return g_cmd_table[i].handler(argc, argv);
         }
     }
