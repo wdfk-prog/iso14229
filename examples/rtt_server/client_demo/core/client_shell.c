@@ -29,6 +29,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 /* ==========================================================================
  * Configuration & Globals
@@ -187,6 +189,18 @@ int handle_help_cmd(int argc, char **argv)
 }
 
 /**
+ * @brief Wrapper for the 'exit' command.
+ * @details The main loop handles shell teardown; this handler only allows
+ *          the command to participate in help output and tab completion.
+ */
+int handle_exit_cmd(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return 0;
+}
+
+/**
  * @brief Helper to trigger remote command sync (alias for help).
  */
 int client_sync_remote_commands(void) 
@@ -200,6 +214,168 @@ int client_sync_remote_commands(void)
  * @brief Autocomplete callback.
  * @details Provides suggestions for commands and file arguments.
  */
+static void add_prefixed_completion(linenoiseCompletions *lc,
+                                  const char *buf,
+                                  size_t prefix_len,
+                                  const char *candidate)
+{
+    char full_completion[512];
+
+    if (!candidate) {
+        return;
+    }
+
+    if (prefix_len + strlen(candidate) >= sizeof(full_completion)) {
+        return;
+    }
+
+    memcpy(full_completion, buf, prefix_len);
+    strcpy(full_completion + prefix_len, candidate);
+    linenoiseAddCompletion(lc, full_completion);
+}
+
+static void complete_remote_commands(const char *buf,
+                                     linenoiseCompletions *lc,
+                                     size_t prefix_len,
+                                     const char *word_part)
+{
+    int count;
+    int i;
+    size_t word_len = strlen(word_part);
+
+    count = client_console_get_cmd_count();
+    for (i = 0; i < count; i++) {
+        const char *name = client_console_get_cmd_name(i);
+        if (name && strncmp(word_part, name, word_len) == 0) {
+            add_prefixed_completion(lc, buf, prefix_len, name);
+        }
+    }
+}
+
+static void complete_remote_files(const char *buf,
+                                  linenoiseCompletions *lc,
+                                  size_t prefix_len,
+                                  const char *word_part)
+{
+    int count;
+    int i;
+    size_t word_len = strlen(word_part);
+
+    count = client_console_get_file_count();
+    for (i = 0; i < count; i++) {
+        const char *fname = client_console_get_file_name(i);
+        if (fname && strncmp(word_part, fname, word_len) == 0) {
+            add_prefixed_completion(lc, buf, prefix_len, fname);
+        }
+    }
+}
+
+static void complete_local_files(const char *buf,
+                                 linenoiseCompletions *lc,
+                                 size_t prefix_len,
+                                 const char *word_part)
+{
+    char dir_part[256] = {0};
+    char search_dir[256] = ".";
+    char entry_prefix[256] = {0};
+    const char *slash;
+    DIR *dir;
+    struct dirent *entry;
+
+    slash = strrchr(word_part, '/');
+    if (slash) {
+        size_t dir_len = (size_t)(slash - word_part + 1);
+        if (dir_len >= sizeof(dir_part)) {
+            return;
+        }
+        memcpy(dir_part, word_part, dir_len);
+        dir_part[dir_len] = '\0';
+        strncpy(entry_prefix, slash + 1, sizeof(entry_prefix) - 1);
+        entry_prefix[sizeof(entry_prefix) - 1] = '\0';
+
+        if (dir_part[0] != '\0') {
+            size_t search_len = dir_len;
+            if (search_len > 1 && dir_part[search_len - 1] == '/') {
+                search_len--;
+            }
+            if (search_len == 0) {
+                strcpy(search_dir, "/");
+            } else if (search_len < sizeof(search_dir)) {
+                memcpy(search_dir, dir_part, search_len);
+                search_dir[search_len] = '\0';
+            } else {
+                return;
+            }
+        }
+    } else {
+        strncpy(entry_prefix, word_part, sizeof(entry_prefix) - 1);
+        entry_prefix[sizeof(entry_prefix) - 1] = '\0';
+    }
+
+    dir = opendir(search_dir);
+    if (!dir) {
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char candidate[512];
+        char full_path[512];
+        struct stat st;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (strncmp(entry->d_name, entry_prefix, strlen(entry_prefix)) != 0) {
+            continue;
+        }
+
+        if (dir_part[0] != '\0') {
+            snprintf(candidate, sizeof(candidate), "%s%s", dir_part, entry->d_name);
+            snprintf(full_path, sizeof(full_path), "%s/%s", search_dir, entry->d_name);
+        } else {
+            snprintf(candidate, sizeof(candidate), "%s", entry->d_name);
+            snprintf(full_path, sizeof(full_path), "%s", entry->d_name);
+        }
+
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            size_t len = strlen(candidate);
+            if (len + 1 < sizeof(candidate)) {
+                candidate[len] = '/';
+                candidate[len + 1] = '\0';
+            }
+        }
+
+        add_prefixed_completion(lc, buf, prefix_len, candidate);
+    }
+
+    closedir(dir);
+}
+
+static int is_local_path_command(const char *cmd)
+{
+    return (strcmp(cmd, "sy") == 0 || strcmp(cmd, "lls") == 0);
+}
+
+static int is_remote_path_command(const char *cmd)
+{
+    return (strcmp(cmd, "ry") == 0 || strcmp(cmd, "cd") == 0);
+}
+
+static int is_local_command_name(const char *cmd)
+{
+    int i;
+    int count = cmd_get_count();
+
+    for (i = 0; i < count; i++) {
+        const char *name = cmd_get_name(i);
+        if (name && strcmp(cmd, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void completion_callback(const char *buf, linenoiseCompletions *lc) 
 {
     size_t len = strlen(buf);
@@ -228,24 +404,37 @@ static void completion_callback(const char *buf, linenoiseCompletions *lc)
             }
         }
     } else {
-        /* Case B: Argument Completion (Files/Dirs) */
+        char cmd_name[64] = {0};
         const char *word_part = last_space + 1;
-        size_t word_len = strlen(word_part);
-        size_t prefix_len = word_part - buf;
-        
-        count = client_console_get_file_count();
-        for (i = 0; i < count; i++) {
-            const char *fname = client_console_get_file_name(i);
-            
-            /* Match against cached file list */
-            if (fname && strncmp(word_part, fname, word_len) == 0) {
-                char full_completion[256];
-                if (prefix_len + strlen(fname) < sizeof(full_completion)) {
-                    strncpy(full_completion, buf, prefix_len);
-                    strcpy(full_completion + prefix_len, fname);
-                    linenoiseAddCompletion(lc, full_completion);
-                }
-            }
+        size_t prefix_len = (size_t)(word_part - buf);
+        size_t cmd_len = (size_t)(last_space - buf);
+
+        if (cmd_len >= sizeof(cmd_name)) {
+            cmd_len = sizeof(cmd_name) - 1;
+        }
+        memcpy(cmd_name, buf, cmd_len);
+        cmd_name[cmd_len] = '\0';
+
+        /* Reduce to first token only. */
+        char *cmd_end = strchr(cmd_name, ' ');
+        if (cmd_end) {
+            *cmd_end = '\0';
+        }
+
+        if (is_local_path_command(cmd_name)) {
+            complete_local_files(buf, lc, prefix_len, word_part);
+        } else if (is_remote_path_command(cmd_name)) {
+            complete_remote_files(buf, lc, prefix_len, word_part);
+        } else if (strcmp(cmd_name, "rexec") == 0) {
+            complete_remote_commands(buf, lc, prefix_len, word_part);
+            complete_remote_files(buf, lc, prefix_len, word_part);
+        } else if (!is_local_command_name(cmd_name)) {
+            /*
+             * Direct remote command mode: complete both remote subcommands
+             * and remote file/directory entries.
+             */
+            complete_remote_commands(buf, lc, prefix_len, word_part);
+            complete_remote_files(buf, lc, prefix_len, word_part);
         }
     }
 }
@@ -284,7 +473,7 @@ void client_shell_init(void)
     
     /* Register built-in shell commands */
     cmd_register("help", handle_help_cmd, "Show Local & Remote Help", "");
-    cmd_register("exit", NULL, "Exit Shell", "");
+    cmd_register("exit", handle_exit_cmd, "Exit Shell", "");
 
     /* Register the disconnect observer with UDS Context */
     uds_register_disconnect_callback(client_on_disconnect);
@@ -364,10 +553,15 @@ int client_shell_loop(void)
                         /* Execute command */
                         char *line_copy = strdup(line);
                         if (line_copy) {
-                            /* Try local, fallback to remote */
+                            /*
+                             * Try local first. Only fall back to remote 0x31 passthrough
+                             * when there is no matching local handler at all.
+                             * This preserves hijacked commands such as sy/ry even when
+                             * the local handler reports an execution failure.
+                             */
                             int res = cmd_execute_line(line_copy);
-                            if (res == -1) {
-                                client_send_console_command(line); /* Send the original unmodified line*/
+                            if (res == CMD_EXEC_NOT_FOUND) {
+                                client_send_console_command(line); /* Send the original unmodified line */
                             }
                             free(line_copy);
                         } else {

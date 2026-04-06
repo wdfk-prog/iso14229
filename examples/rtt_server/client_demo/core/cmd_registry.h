@@ -36,6 +36,14 @@ extern "C" {
  */
 typedef int (*cmd_handler_t)(int argc, char **argv);
 
+/**
+ * @brief Returned by cmd_execute_line() when no local command matches.
+ * @details This sentinel lets the shell distinguish "not handled locally"
+ *          from "handled locally but failed" so hijacked commands such as
+ *          sy/ry never fall back to 0x31 remote passthrough on local errors.
+ */
+#define CMD_EXEC_NOT_FOUND (-127)
+
 /* ==========================================================================
  * Public API
  * ========================================================================== */
@@ -65,7 +73,8 @@ int cmd_register(const char *name, cmd_handler_t handler, const char *help, cons
  * @details Tokenizes the input string and searches for a matching command name.
  * 
  * @param input_line The raw input string (Note: may be modified by tokenizer).
- * @return int 0 on success, -1 if command is not found, or handler return code.
+ * @return int Handler return code when a local command is matched;
+ *         CMD_EXEC_NOT_FOUND when no local command matches.
  */
 int cmd_execute_line(char *input_line);
 

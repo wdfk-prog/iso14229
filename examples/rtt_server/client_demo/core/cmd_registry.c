@@ -135,7 +135,7 @@ const char* cmd_get_hint(const char *name)
  * @brief Parses and executes a command line string.
  * 
  * @param input_line Raw command string (will be modified during parsing).
- * @return int Return value of the handler, or -1 if command not found.
+ * @return int Handler return code, or CMD_EXEC_NOT_FOUND if the command is not registered locally.
  */
 int cmd_execute_line(char *input_line) 
 {
@@ -145,13 +145,13 @@ int cmd_execute_line(char *input_line)
 
     /* Sanity check */
     if (input_line == NULL || strlen(input_line) == 0) {
-        return -1;
+        return CMD_EXEC_NOT_FOUND;
     }
 
     /* Tokenize input */
     argc = split_args(input_line, argv, CMD_MAX_ARGS);
     if (argc == 0) {
-        return -1;
+        return CMD_EXEC_NOT_FOUND;
     }
 
     /* Lookup and execute */
@@ -161,7 +161,7 @@ int cmd_execute_line(char *input_line)
         }
     }
 
-    return -1; /* Command not found */
+    return CMD_EXEC_NOT_FOUND; /* Command not found */
 }
 
 /**
