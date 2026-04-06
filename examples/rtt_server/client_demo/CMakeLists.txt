@@ -28,6 +28,36 @@ set(CLIENT_COMMON_COMPILE_DEFS
     UDS_LOG_LEVEL=2
 )
 
+set(CLIENT_APP_SHARED_SOURCES
+    main.c
+
+    core/client_config.c
+    core/cmd_registry.c
+    core/response_registry.c
+    core/uds_context.c
+
+    services/client_0x10_session.c
+    services/client_0x11_reset.c
+    services/client_0x22_0x2E_param.c
+    services/client_0x27_security.c
+    services/client_0x28_comm.c
+    services/client_0x2A_ulog.c
+    services/client_0x2F_io.c
+    services/client_0x31_console.c
+    services/client_0x36_0x37_0x38_file.c
+
+    utils/utils.c
+)
+
+set(CLIENT_POSIX_SHELL_SOURCES
+    core/client_shell.c
+    utils/linenoise.c
+)
+
+set(CLIENT_WINDOWS_SHELL_SOURCES
+    core/client_shell_windows.c
+)
+
 set(CLIENT_WARNING_OPTIONS)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     list(APPEND CLIENT_WARNING_OPTIONS
@@ -72,32 +102,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 
     add_executable(client
-        main.c
-
-        core/client_config.c
-        core/client_shell.c
-        core/cmd_registry.c
-        core/response_registry.c
-        core/uds_context.c
-
-        services/client_0x10_session.c
-        services/client_0x11_reset.c
-        services/client_0x22_0x2E_param.c
-        services/client_0x27_security.c
-        services/client_0x28_comm.c
-        services/client_0x2A_ulog.c
-        services/client_0x2F_io.c
-        services/client_0x31_console.c
-        services/client_0x36_0x37_0x38_file.c
-
-        utils/linenoise.c
-        utils/utils.c
-
+        ${CLIENT_APP_SHARED_SOURCES}
+        ${CLIENT_POSIX_SHELL_SOURCES}
         platform/platform_linux.c
-
         transport/transport.c
         transport/transport_socketcan.c
-
         ../iso14229.c
     )
     add_executable(client_demo::client ALIAS client)
@@ -241,6 +250,32 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         list(APPEND WINDOWS_TRANSPORT_LIBS ws2_32)
         list(APPEND WINDOWS_TRANSPORT_DEFS UDS_TRANSPORT_ENABLE_PYCAN_BRIDGE UDS_ENABLE_PYCAN_BRIDGE)
         message(STATUS "Configuring Windows / MSYS2 MINGW64 skeleton (PYCAN_BRIDGE)")
+    endif()
+
+
+    if(UDS_WIN_BACKEND STREQUAL "PYCAN_BRIDGE")
+        add_executable(client
+            ${CLIENT_APP_SHARED_SOURCES}
+            ${CLIENT_WINDOWS_SHELL_SOURCES}
+            platform/platform_windows.c
+            transport/transport.c
+            ${WINDOWS_TRANSPORT_SOURCE}
+            ../iso14229.c
+        )
+        add_executable(client_demo::client ALIAS client)
+        client_demo_apply_common_settings(client)
+        if(WINDOWS_TRANSPORT_LIBS)
+            target_link_libraries(client
+                PRIVATE
+                    ${WINDOWS_TRANSPORT_LIBS}
+            )
+        endif()
+        target_compile_definitions(client
+            PRIVATE
+                ${WINDOWS_TRANSPORT_DEFS}
+        )
+    else()
+        message(STATUS "Skipping formal client target for TSMASTER_API; smoke target remains the supported Windows entry.")
     endif()
 
     if(UDS_BUILD_WINDOWS_SMOKE)

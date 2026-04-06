@@ -73,6 +73,13 @@
       ]
     },
     {
+      "name": "build-client-pycan",
+      "configurePreset": "windows-pycan-mingw64",
+      "targets": [
+        "client"
+      ]
+    },
+    {
       "name": "build-client-smoke-pycan",
       "configurePreset": "windows-pycan-mingw64",
       "targets": [

@@ -27,7 +27,6 @@
 #include "core/client.h"
 #include "utils/utils.h"
 #include <stdio.h>
-#include <unistd.h>
 
 /**
  * @brief Prompts the user to attempt a reconnection after a failure.
