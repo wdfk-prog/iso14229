@@ -19,8 +19,15 @@ extern "C" {
 
 #include "iso14229.h"
 
-/* Conservative static storage budget for large ISO-TP socket context. */
-#define UDS_TRANSPORT_STORAGE_CAPACITY ((UDS_ISOTP_MTU * 2U) + 1024U)
+/*
+ * Static storage budget for backend private contexts.
+ *
+ * The Windows TSMaster backend embeds an ISO-TP client instance, a receive
+ * queue, dynamic-loader state, and synchronization primitives. Keep this value
+ * comfortably above the largest backend context so callers can bind a single
+ * fixed-size storage block without backend-specific allocation.
+ */
+#define UDS_TRANSPORT_STORAGE_CAPACITY (64U * 1024U)
 
 /**
  * @brief Backend selector for transport implementations.
@@ -60,6 +67,28 @@ typedef struct {
 typedef struct {
     const char *if_name;
 } uds_transport_socketcan_cfg_t;
+
+/**
+ * @brief Windows TSMaster backend-specific open configuration.
+ * @details String pointers are borrowed only for the duration of
+ *          `uds_transport_open()`; backend implementations must copy them.
+ */
+typedef struct {
+    const char *app_name;
+    const char *hw_device_name;
+    uint8_t app_channel_index;
+    int32_t hw_device_type;
+    int32_t hw_device_sub_type;
+    int32_t hw_index;
+    int32_t hw_channel_index;
+    float can_baudrate_kbps;
+    float canfd_arb_baudrate_kbps;
+    float canfd_data_baudrate_kbps;
+    bool use_canfd;
+    bool use_brs;
+    bool install_term_resistor;
+    bool use_extended_ids;
+} uds_transport_tsmaster_cfg_t;
 
 /**
  * @brief Transport-layer asynchronous error callback.

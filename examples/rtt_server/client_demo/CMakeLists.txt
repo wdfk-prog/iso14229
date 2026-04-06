@@ -197,6 +197,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         )
     endif()
 
+    get_filename_component(UDS_TSMASTER_IMPORT_LIB_DIR "${UDS_TSMASTER_IMPORT_LIB}" DIRECTORY)
+    set(UDS_TSMASTER_DLL_HINT_PATH "${UDS_TSMASTER_IMPORT_LIB_DIR}/TSMaster.dll")
+    set(UDS_TSMASTER_DLL_HINT_PATH_ALT "${UDS_TSMASTER_SDK_DIR}/TSMaster.dll")
+
     add_library(tsmaster_sdk INTERFACE)
     add_library(client_demo::tsmaster_sdk ALIAS tsmaster_sdk)
     target_include_directories(tsmaster_sdk
@@ -213,6 +217,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
             UDS_WINDOWS_BUILD
             UDS_WINDOWS_TSMaster_API
             UDS_WIN_ARCH_X64
+            UDS_TSMASTER_DLL_HINT_PATH="${UDS_TSMASTER_DLL_HINT_PATH}"
+            UDS_TSMASTER_DLL_HINT_PATH_ALT="${UDS_TSMASTER_DLL_HINT_PATH_ALT}"
     )
 
     if(UDS_BUILD_WINDOWS_SMOKE)
@@ -235,6 +241,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
                 UDS_WINDOWS_BUILD
                 UDS_WINDOWS_TSMaster_API
                 UDS_WIN_ARCH_X64
+                UDS_TP_ISOTP_C
                 UDS_CUSTOM_MILLIS=1
         )
     endif()

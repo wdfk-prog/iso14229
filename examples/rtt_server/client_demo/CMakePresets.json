@@ -1,0 +1,57 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-tsmaster-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-mingw64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "UDS_ENABLE_WINDOWS": "ON",
+        "UDS_WIN_BACKEND": "TSMASTER_API",
+        "UDS_WIN_ARCH": "x64",
+        "UDS_BUILD_WINDOWS_SMOKE": "ON"
+      }
+    },
+    {
+      "name": "windows-tsmaster-mingw64",
+      "displayName": "Windows / MSYS2 MINGW64 + TSMaster smoke",
+      "description": "Reads UDS_TSMASTER_SDK_DIR from the environment.",
+      "inherits": "windows-tsmaster-base",
+      "cacheVariables": {
+        "UDS_TSMASTER_SDK_DIR": "$env{UDS_TSMASTER_SDK_DIR}"
+      }
+    },
+    {
+      "name": "windows-tsmaster-mingw64-inline-sdk",
+      "displayName": "Windows / MSYS2 MINGW64 + TSMaster smoke (inline SDK path)",
+      "description": "Edit UDS_TSMASTER_SDK_DIR below if you do not want to export it in the shell.",
+      "inherits": "windows-tsmaster-base",
+      "cacheVariables": {
+        "UDS_TSMASTER_SDK_DIR": "D:/TOSUN/TSMaster/Data/SDK"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-client-smoke",
+      "configurePreset": "windows-tsmaster-mingw64",
+      "targets": [
+        "client_smoke"
+      ]
+    },
+    {
+      "name": "build-client-smoke-inline-sdk",
+      "configurePreset": "windows-tsmaster-mingw64-inline-sdk",
+      "targets": [
+        "client_smoke"
+      ]
+    }
+  ]
+}
