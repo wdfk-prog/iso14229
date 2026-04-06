@@ -249,6 +249,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
             platform/platform_windows.c
             transport/transport.c
             ${WINDOWS_TRANSPORT_SOURCE}
+            utils/utils.c
             ../iso14229.c
         )
         add_executable(client_demo::client_smoke ALIAS client_smoke)

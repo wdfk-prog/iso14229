@@ -12,11 +12,13 @@
 
 #include "platform.h"
 #include "../transport/transport.h"
+#include "../utils/utils.h"
 
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #define SMOKE_DEFAULT_PHYS_RX_ID   0x7E8u
@@ -41,6 +43,19 @@
 #define SMOKE_DEFAULT_SESSION_REPEAT        3u
 #define SMOKE_DEFAULT_SESSION_TIMEOUT_MS    2000u
 #define SMOKE_DEFAULT_SESSION_GAP_MS        200u
+#define SMOKE_DEFAULT_SECURITY_LEVEL        0x01u
+#define SMOKE_DEFAULT_SECURITY_REPEAT       1u
+#define SMOKE_DEFAULT_SECURITY_TIMEOUT_MS   2000u
+#define SMOKE_DEFAULT_SECURITY_GAP_MS       200u
+#define SMOKE_DEFAULT_REXEC_REPEAT          1u
+#define SMOKE_DEFAULT_REXEC_TIMEOUT_MS      4000u
+#define SMOKE_DEFAULT_REXEC_CMD             "ps"
+#define SMOKE_DEFAULT_REXEC_EXPECT          ""
+#define SMOKE_DEFAULT_FILE_TIMEOUT_MS       5000u
+#define SMOKE_DEFAULT_REMOTE_CONSOLE_RID    0xF000u
+#define SMOKE_DEFAULT_SECRET_KEY_MASK       0xA5A5A5A5u
+#define SMOKE_DEFAULT_MOOP_ADD_FILE         0x01u
+#define SMOKE_DEFAULT_MOOP_READ_FILE        0x04u
 
 #define SMOKE_MAX_NAME_LEN         64u
 #define SMOKE_MAX_PATH_LEN         260u
@@ -79,12 +94,38 @@ typedef struct {
     int pycan_auto_spawn;
     int pycan_debug_tcp_mode;
     int run_session_smoke;
+    int run_security_smoke;
+    int run_rexec_smoke;
+    int run_file_smoke;
     uint32_t session_id;
     uint32_t session_repeat;
     uint32_t session_timeout_ms;
     uint32_t session_gap_ms;
+    uint32_t security_level;
+    uint32_t security_repeat;
+    uint32_t security_timeout_ms;
+    uint32_t security_gap_ms;
+    uint32_t rexec_repeat;
+    uint32_t rexec_timeout_ms;
+    uint32_t file_timeout_ms;
+    char rexec_cmd[SMOKE_MAX_LINE_LEN];
+    char rexec_expect[SMOKE_MAX_LINE_LEN];
+    char file_local_upload[SMOKE_MAX_PATH_LEN];
+    char file_remote_name[SMOKE_MAX_PATH_LEN];
+    char file_local_download[SMOKE_MAX_PATH_LEN];
     int conf_loaded;
 } smoke_settings_t;
+
+typedef struct {
+    volatile int response_done;
+    uint8_t response_sid;
+    uint8_t response_subfn;
+    uint16_t response_rid;
+    uint8_t last_nrc;
+    UDSErr_t last_err;
+    uint16_t recv_size;
+    uint8_t recv_buf[UDS_CLIENT_RECV_BUF_SIZE];
+} smoke_request_state_t;
 
 typedef struct {
     volatile int response_done;
@@ -94,6 +135,12 @@ typedef struct {
     uint8_t last_nrc;
     UDSErr_t last_err;
 } smoke_session_state_t;
+
+typedef struct {
+    int valid;
+    uint32_t p2_ms;
+    uint32_t p2_star_ms;
+} smoke_client_timing_t;
 
 static void smoke_copy_string(char *dst, size_t dst_size, const char *src)
 {
@@ -349,10 +396,25 @@ static void smoke_settings_init_defaults(smoke_settings_t *cfg)
     cfg->pycan_auto_spawn = 1;
     cfg->pycan_debug_tcp_mode = 0;
     cfg->run_session_smoke = 0;
+    cfg->run_security_smoke = 0;
+    cfg->run_rexec_smoke = 0;
+    cfg->run_file_smoke = 0;
     cfg->session_id = SMOKE_DEFAULT_SESSION_ID;
     cfg->session_repeat = SMOKE_DEFAULT_SESSION_REPEAT;
     cfg->session_timeout_ms = SMOKE_DEFAULT_SESSION_TIMEOUT_MS;
     cfg->session_gap_ms = SMOKE_DEFAULT_SESSION_GAP_MS;
+    cfg->security_level = SMOKE_DEFAULT_SECURITY_LEVEL;
+    cfg->security_repeat = SMOKE_DEFAULT_SECURITY_REPEAT;
+    cfg->security_timeout_ms = SMOKE_DEFAULT_SECURITY_TIMEOUT_MS;
+    cfg->security_gap_ms = SMOKE_DEFAULT_SECURITY_GAP_MS;
+    cfg->rexec_repeat = SMOKE_DEFAULT_REXEC_REPEAT;
+    cfg->rexec_timeout_ms = SMOKE_DEFAULT_REXEC_TIMEOUT_MS;
+    cfg->file_timeout_ms = SMOKE_DEFAULT_FILE_TIMEOUT_MS;
+    smoke_copy_string(cfg->rexec_cmd, sizeof(cfg->rexec_cmd), SMOKE_DEFAULT_REXEC_CMD);
+    smoke_copy_string(cfg->rexec_expect, sizeof(cfg->rexec_expect), SMOKE_DEFAULT_REXEC_EXPECT);
+    cfg->file_local_upload[0] = '\0';
+    cfg->file_remote_name[0] = '\0';
+    cfg->file_local_download[0] = '\0';
     cfg->conf_loaded = 0;
 }
 
@@ -481,6 +543,57 @@ static void smoke_settings_apply_env(smoke_settings_t *cfg)
     value = smoke_get_env_nonempty("UDS_SMOKE_SESSION_ID");
     if (value != NULL && smoke_parse_hex_byte_text(value, &u32_value)) {
         cfg->session_id = u32_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_RUN_SECURITY", &bool_value)) {
+        cfg->run_security_smoke = bool_value;
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_SECURITY_LEVEL");
+    if (value != NULL && smoke_parse_hex_byte_text(value, &u32_value)) {
+        cfg->security_level = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SECURITY_REPEAT", &u32_value) && u32_value > 0u) {
+        cfg->security_repeat = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SECURITY_TIMEOUT_MS", &u32_value) && u32_value > 0u) {
+        cfg->security_timeout_ms = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_SECURITY_GAP_MS", &u32_value)) {
+        cfg->security_gap_ms = u32_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_RUN_REXEC", &bool_value)) {
+        cfg->run_rexec_smoke = bool_value;
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_REXEC_CMD");
+    if (value != NULL) {
+        smoke_copy_string(cfg->rexec_cmd, sizeof(cfg->rexec_cmd), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_REXEC_EXPECT");
+    if (value != NULL) {
+        smoke_copy_string(cfg->rexec_expect, sizeof(cfg->rexec_expect), value);
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_REXEC_REPEAT", &u32_value) && u32_value > 0u) {
+        cfg->rexec_repeat = u32_value;
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_REXEC_TIMEOUT_MS", &u32_value) && u32_value > 0u) {
+        cfg->rexec_timeout_ms = u32_value;
+    }
+    if (smoke_read_bool_env("UDS_SMOKE_RUN_FILE", &bool_value)) {
+        cfg->run_file_smoke = bool_value;
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_FILE_LOCAL_UPLOAD");
+    if (value != NULL) {
+        smoke_copy_string(cfg->file_local_upload, sizeof(cfg->file_local_upload), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_FILE_REMOTE_NAME");
+    if (value != NULL) {
+        smoke_copy_string(cfg->file_remote_name, sizeof(cfg->file_remote_name), value);
+    }
+    value = smoke_get_env_nonempty("UDS_SMOKE_FILE_LOCAL_DOWNLOAD");
+    if (value != NULL) {
+        smoke_copy_string(cfg->file_local_download, sizeof(cfg->file_local_download), value);
+    }
+    if (smoke_read_u32_env("UDS_SMOKE_FILE_TIMEOUT_MS", &u32_value) && u32_value > 0u) {
+        cfg->file_timeout_ms = u32_value;
     }
 }
 
@@ -712,6 +825,96 @@ static int smoke_apply_conf_kv(smoke_settings_t *cfg, const char *key, const cha
         }
         return 0;
     }
+    if (strcmp(key, "run_security_smoke") == 0 || strcmp(key, "security_smoke") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->run_security_smoke = bool_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "security_level") == 0) {
+        if (smoke_parse_hex_byte_text(value, &u32_value)) {
+            cfg->security_level = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "security_repeat") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->security_repeat = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "security_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->security_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "security_gap_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value)) {
+            cfg->security_gap_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "run_rexec_smoke") == 0 || strcmp(key, "rexec_smoke") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->run_rexec_smoke = bool_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "rexec_cmd") == 0) {
+        smoke_copy_string(cfg->rexec_cmd, sizeof(cfg->rexec_cmd), value);
+        return 1;
+    }
+    if (strcmp(key, "rexec_expect") == 0) {
+        smoke_copy_string(cfg->rexec_expect, sizeof(cfg->rexec_expect), value);
+        return 1;
+    }
+    if (strcmp(key, "rexec_repeat") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->rexec_repeat = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "rexec_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->rexec_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "run_file_smoke") == 0 || strcmp(key, "file_smoke") == 0) {
+        if (smoke_parse_bool_text(value, &bool_value)) {
+            cfg->run_file_smoke = bool_value;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "file_local_upload") == 0) {
+        smoke_copy_string(cfg->file_local_upload, sizeof(cfg->file_local_upload), value);
+        return 1;
+    }
+    if (strcmp(key, "file_remote_name") == 0) {
+        smoke_copy_string(cfg->file_remote_name, sizeof(cfg->file_remote_name), value);
+        return 1;
+    }
+    if (strcmp(key, "file_local_download") == 0) {
+        smoke_copy_string(cfg->file_local_download, sizeof(cfg->file_local_download), value);
+        return 1;
+    }
+    if (strcmp(key, "file_timeout_ms") == 0) {
+        if (smoke_parse_u32_text(value, &u32_value) && u32_value > 0u) {
+            cfg->file_timeout_ms = u32_value;
+            return 1;
+        }
+        return 0;
+    }
 
     return 0;
 }
@@ -794,6 +997,744 @@ static void smoke_try_load_default_conf(smoke_settings_t *cfg)
     if (!smoke_try_load_conf(cfg, "./client_smoke.conf")) {
         (void)smoke_try_load_conf(cfg, "./tsmaster_smoke.conf");
     }
+}
+
+
+static void smoke_request_state_reset(smoke_request_state_t *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->last_err = UDS_OK;
+}
+
+static UDSErr_t smoke_request_event_handler(UDSClient_t *client, UDSEvent_t evt, void *ev_data)
+{
+    smoke_request_state_t *state;
+
+    if (client == NULL || client->fn_data == NULL) {
+        return UDS_OK;
+    }
+
+    state = (smoke_request_state_t *)client->fn_data;
+
+    switch (evt) {
+    case UDS_EVT_ResponseReceived:
+        state->recv_size = client->recv_size;
+        if (state->recv_size > sizeof(state->recv_buf)) {
+            state->recv_size = (uint16_t)sizeof(state->recv_buf);
+        }
+        if (state->recv_size > 0u) {
+            memcpy(state->recv_buf, client->recv_buf, state->recv_size);
+            state->response_sid = state->recv_buf[0];
+        }
+        if (state->recv_size > 1u) {
+            state->response_subfn = state->recv_buf[1];
+        }
+        if (state->recv_size > 3u) {
+            state->response_rid = (uint16_t)(((uint16_t)state->recv_buf[2] << 8) | state->recv_buf[3]);
+        }
+        state->last_err = UDS_OK;
+        state->response_done = 1;
+        break;
+
+    case UDS_EVT_Err:
+        if (ev_data != NULL) {
+            state->last_err = *(const UDSErr_t *)ev_data;
+            if (((unsigned)state->last_err & 0xFF00u) == 0u) {
+                state->last_nrc = (uint8_t)state->last_err;
+            } else {
+                state->last_nrc = 0u;
+            }
+        } else {
+            state->last_err = UDS_ERR_TPORT;
+            state->last_nrc = 0u;
+        }
+        state->response_done = 1;
+        break;
+
+    default:
+        break;
+    }
+
+    return UDS_OK;
+}
+
+static int smoke_wait_for_request_result(UDSClient_t *client,
+                                         smoke_request_state_t *state,
+                                         uint32_t timeout_ms)
+{
+    uint32_t start_ms;
+
+    if (client == NULL || state == NULL || timeout_ms == 0u) {
+        return -1;
+    }
+
+    start_ms = platform_tick_ms();
+    while (!state->response_done) {
+        (void)UDSClientPoll(client);
+        if ((platform_tick_ms() - start_ms) > timeout_ms) {
+            state->last_err = UDS_ERR_TIMEOUT;
+            return -1;
+        }
+        platform_sleep_ms(1u);
+    }
+
+    return (state->last_err == UDS_OK) ? 0 : -1;
+}
+
+static void smoke_apply_client_timing(UDSClient_t *client, const smoke_client_timing_t *timing)
+{
+    if (client == NULL || timing == NULL || !timing->valid) {
+        return;
+    }
+
+    if (timing->p2_ms > 0u) {
+        client->p2_ms = timing->p2_ms;
+    }
+    if (timing->p2_star_ms >= client->p2_ms) {
+        client->p2_star_ms = timing->p2_star_ms;
+    }
+}
+
+static uint32_t smoke_calc_key_from_seed(const uint8_t *seed, uint16_t seed_len)
+{
+    uint32_t seed_val = 0u;
+    uint16_t i;
+
+    for (i = 0u; i < seed_len && i < 4u; ++i) {
+        seed_val = (seed_val << 8) | (uint32_t)seed[i];
+    }
+
+    return seed_val ^ SMOKE_DEFAULT_SECRET_KEY_MASK;
+}
+
+static int smoke_payload_contains(const uint8_t *data, uint16_t len, const char *needle)
+{
+    size_t needle_len;
+    uint16_t i;
+
+    if (needle == NULL || needle[0] == '\0') {
+        return 1;
+    }
+    if (data == NULL || len == 0u) {
+        return 0;
+    }
+
+    needle_len = strlen(needle);
+    if (needle_len == 0u) {
+        return 1;
+    }
+    if ((size_t)len < needle_len) {
+        return 0;
+    }
+
+    for (i = 0u; (size_t)i + needle_len <= (size_t)len; ++i) {
+        if (memcmp(&data[i], needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static const char *smoke_file_basename(const char *path)
+{
+    const char *slash;
+    const char *backslash;
+    const char *base;
+
+    if (path == NULL || path[0] == '\0') {
+        return path;
+    }
+
+    slash = strrchr(path, '/');
+    backslash = strrchr(path, '\\');
+    base = path;
+    if (slash != NULL && slash[1] != '\0') {
+        base = slash + 1;
+    }
+    if (backslash != NULL && backslash[1] != '\0' && backslash + 1 > base) {
+        base = backslash + 1;
+    }
+    return base;
+}
+
+static int smoke_crc32_file(const char *path, uint32_t *crc_out, size_t *size_out)
+{
+    FILE *fp;
+    uint8_t buffer[512];
+    size_t nread;
+    uint32_t crc = 0u;
+    size_t total = 0u;
+
+    if (path == NULL || crc_out == NULL || size_out == NULL) {
+        return -1;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    while ((nread = fread(buffer, 1u, sizeof(buffer), fp)) > 0u) {
+        crc = crc32_calc(crc, buffer, nread);
+        total += nread;
+    }
+
+    if (ferror(fp)) {
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+    *crc_out = crc;
+    *size_out = total;
+    return 0;
+}
+
+static int smoke_run_security_sequence(uds_transport_t *tp, const smoke_settings_t *cfg, const smoke_client_timing_t *timing)
+{
+    UDSClient_t client;
+    smoke_request_state_t state;
+    struct SecurityAccessResponse resp;
+    UDSErr_t err;
+    uint32_t attempt;
+    uint32_t key_val;
+    uint8_t key_bytes[4];
+
+    if (tp == NULL || cfg == NULL) {
+        return -1;
+    }
+    if ((cfg->security_level & 0x1u) == 0u) {
+        fprintf(stderr, "[client_smoke] security level must be odd, got 0x%02X\n",
+                (unsigned)cfg->security_level);
+        return -1;
+    }
+
+    memset(&client, 0, sizeof(client));
+    smoke_request_state_reset(&state);
+    memset(&resp, 0, sizeof(resp));
+
+    err = UDSClientInit(&client);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] security UDSClientInit failed err=%d\n", (int)err);
+        return -1;
+    }
+    client.tp = uds_transport_get_tp_handle(tp);
+    client.fn = smoke_request_event_handler;
+    client.fn_data = &state;
+    smoke_apply_client_timing(&client, timing);
+    if (client.tp == NULL) {
+        fprintf(stderr, "[client_smoke] security transport handle is NULL\n");
+        return -1;
+    }
+
+    printf("[client_smoke] security smoke enabled level=0x%02X repeat=%lu timeout_ms=%lu gap_ms=%lu\n",
+           (unsigned)cfg->security_level,
+           (unsigned long)cfg->security_repeat,
+           (unsigned long)cfg->security_timeout_ms,
+           (unsigned long)cfg->security_gap_ms);
+
+    for (attempt = 0u; attempt < cfg->security_repeat; ++attempt) {
+        smoke_request_state_reset(&state);
+        err = UDSSendSecurityAccess(&client, (uint8_t)cfg->security_level, NULL, 0u);
+        if (err != UDS_OK) {
+            fprintf(stderr, "[client_smoke] security attempt %lu/%lu request-seed send failed err=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->security_repeat,
+                    (int)err);
+            return -1;
+        }
+        if (smoke_wait_for_request_result(&client, &state, cfg->security_timeout_ms) != 0) {
+            fprintf(stderr, "[client_smoke] security attempt %lu/%lu request-seed failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->security_repeat,
+                    (int)state.last_err,
+                    state.last_nrc,
+                    state.response_sid,
+                    uds_transport_get_last_error(tp));
+            return -1;
+        }
+        client.recv_size = state.recv_size;
+        if (client.recv_size > 0u) {
+            memcpy(client.recv_buf, state.recv_buf, client.recv_size);
+        }
+        if (UDSUnpackSecurityAccessResponse(&client, &resp) != UDS_OK) {
+            fprintf(stderr, "[client_smoke] security attempt %lu/%lu unpack seed response failed\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->security_repeat);
+            return -1;
+        }
+        if (resp.securityAccessType != (uint8_t)cfg->security_level) {
+            fprintf(stderr, "[client_smoke] security attempt %lu/%lu response level mismatch got=0x%02X expect=0x%02X\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->security_repeat,
+                    (unsigned)resp.securityAccessType,
+                    (unsigned)cfg->security_level);
+            return -1;
+        }
+        if (resp.securitySeedLength == 0u) {
+            printf("[client_smoke] security attempt %lu/%lu already unlocked level=0x%02X\n",
+                   (unsigned long)(attempt + 1u),
+                   (unsigned long)cfg->security_repeat,
+                   (unsigned)cfg->security_level);
+        } else {
+            if (resp.securitySeed == NULL || resp.securitySeedLength != 4u) {
+                fprintf(stderr, "[client_smoke] security attempt %lu/%lu unexpected seed length=%u\n",
+                        (unsigned long)(attempt + 1u),
+                        (unsigned long)cfg->security_repeat,
+                        (unsigned)resp.securitySeedLength);
+                return -1;
+            }
+            key_val = smoke_calc_key_from_seed(resp.securitySeed, resp.securitySeedLength);
+            key_bytes[0] = (uint8_t)((key_val >> 24) & 0xFFu);
+            key_bytes[1] = (uint8_t)((key_val >> 16) & 0xFFu);
+            key_bytes[2] = (uint8_t)((key_val >> 8) & 0xFFu);
+            key_bytes[3] = (uint8_t)(key_val & 0xFFu);
+
+            smoke_request_state_reset(&state);
+            err = UDSSendSecurityAccess(&client, (uint8_t)(cfg->security_level + 1u), key_bytes, 4u);
+            if (err != UDS_OK) {
+                fprintf(stderr, "[client_smoke] security attempt %lu/%lu send-key failed err=%d\n",
+                        (unsigned long)(attempt + 1u),
+                        (unsigned long)cfg->security_repeat,
+                        (int)err);
+                return -1;
+            }
+            if (smoke_wait_for_request_result(&client, &state, cfg->security_timeout_ms) != 0) {
+                fprintf(stderr, "[client_smoke] security attempt %lu/%lu send-key failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                        (unsigned long)(attempt + 1u),
+                        (unsigned long)cfg->security_repeat,
+                        (int)state.last_err,
+                        state.last_nrc,
+                        state.response_sid,
+                        uds_transport_get_last_error(tp));
+                return -1;
+            }
+            if (state.recv_size < 2u || state.response_sid != 0x67u || state.response_subfn != (uint8_t)(cfg->security_level + 1u)) {
+                fprintf(stderr, "[client_smoke] security attempt %lu/%lu invalid key response sid=0x%02X sub=0x%02X size=%u\n",
+                        (unsigned long)(attempt + 1u),
+                        (unsigned long)cfg->security_repeat,
+                        state.response_sid,
+                        state.response_subfn,
+                        (unsigned)state.recv_size);
+                return -1;
+            }
+            printf("[client_smoke] security attempt %lu/%lu ok level=0x%02X key=0x%08lX\n",
+                   (unsigned long)(attempt + 1u),
+                   (unsigned long)cfg->security_repeat,
+                   (unsigned)cfg->security_level,
+                   (unsigned long)key_val);
+        }
+
+        if (attempt + 1u < cfg->security_repeat && cfg->security_gap_ms > 0u) {
+            platform_sleep_ms(cfg->security_gap_ms);
+        }
+    }
+
+    return 0;
+}
+
+static int smoke_run_rexec_sequence(uds_transport_t *tp, const smoke_settings_t *cfg, const smoke_client_timing_t *timing)
+{
+    UDSClient_t client;
+    smoke_request_state_t state;
+    UDSErr_t err;
+    uint32_t attempt;
+    size_t cmd_len;
+    uint16_t payload_len;
+
+    if (tp == NULL || cfg == NULL) {
+        return -1;
+    }
+    if (cfg->rexec_cmd[0] == '\0') {
+        fprintf(stderr, "[client_smoke] rexec smoke command is empty\n");
+        return -1;
+    }
+
+    memset(&client, 0, sizeof(client));
+    smoke_request_state_reset(&state);
+    err = UDSClientInit(&client);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] rexec UDSClientInit failed err=%d\n", (int)err);
+        return -1;
+    }
+    client.tp = uds_transport_get_tp_handle(tp);
+    client.fn = smoke_request_event_handler;
+    client.fn_data = &state;
+    smoke_apply_client_timing(&client, timing);
+    if (client.tp == NULL) {
+        fprintf(stderr, "[client_smoke] rexec transport handle is NULL\n");
+        return -1;
+    }
+
+    cmd_len = strlen(cfg->rexec_cmd);
+    printf("[client_smoke] rexec smoke enabled repeat=%lu timeout_ms=%lu cmd=%s\n",
+           (unsigned long)cfg->rexec_repeat,
+           (unsigned long)cfg->rexec_timeout_ms,
+           cfg->rexec_cmd);
+
+    for (attempt = 0u; attempt < cfg->rexec_repeat; ++attempt) {
+        smoke_request_state_reset(&state);
+        err = UDSSendRoutineCtrl(&client,
+                                 0x01u,
+                                 SMOKE_DEFAULT_REMOTE_CONSOLE_RID,
+                                 (const uint8_t *)cfg->rexec_cmd,
+                                 (uint16_t)cmd_len);
+        if (err != UDS_OK) {
+            fprintf(stderr, "[client_smoke] rexec attempt %lu/%lu send failed err=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->rexec_repeat,
+                    (int)err);
+            return -1;
+        }
+        if (smoke_wait_for_request_result(&client, &state, cfg->rexec_timeout_ms) != 0) {
+            fprintf(stderr, "[client_smoke] rexec attempt %lu/%lu failed err=%d nrc=0x%02X resp_sid=0x%02X resp_sub=0x%02X rid=0x%04X last_error=%d\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->rexec_repeat,
+                    (int)state.last_err,
+                    state.last_nrc,
+                    state.response_sid,
+                    state.response_subfn,
+                    (unsigned)state.response_rid,
+                    uds_transport_get_last_error(tp));
+            return -1;
+        }
+        if (state.recv_size < 4u || state.response_sid != 0x71u || state.response_subfn != 0x01u ||
+            state.response_rid != SMOKE_DEFAULT_REMOTE_CONSOLE_RID) {
+            fprintf(stderr, "[client_smoke] rexec attempt %lu/%lu invalid response sid=0x%02X sub=0x%02X rid=0x%04X size=%u\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->rexec_repeat,
+                    state.response_sid,
+                    state.response_subfn,
+                    (unsigned)state.response_rid,
+                    (unsigned)state.recv_size);
+            return -1;
+        }
+        payload_len = (uint16_t)(state.recv_size - 4u);
+        if (!smoke_payload_contains(&state.recv_buf[4], payload_len, cfg->rexec_expect)) {
+            fprintf(stderr, "[client_smoke] rexec attempt %lu/%lu output missing expected text: %s\n",
+                    (unsigned long)(attempt + 1u),
+                    (unsigned long)cfg->rexec_repeat,
+                    cfg->rexec_expect);
+            return -1;
+        }
+        printf("[client_smoke] rexec attempt %lu/%lu ok payload_len=%u\n",
+               (unsigned long)(attempt + 1u),
+               (unsigned long)cfg->rexec_repeat,
+               (unsigned)payload_len);
+    }
+
+    return 0;
+}
+
+static int smoke_run_file_sequence(uds_transport_t *tp, const smoke_settings_t *cfg, const smoke_client_timing_t *timing)
+{
+    UDSClient_t client;
+    smoke_request_state_t state;
+    struct RequestFileTransferResponse resp;
+    struct stat st;
+    FILE *fp;
+    const char *remote_name;
+    uint8_t buffer[4095];
+    uint32_t src_crc = 0u;
+    uint32_t dst_crc = 0u;
+    size_t src_size = 0u;
+    size_t dst_size = 0u;
+    size_t max_chunk;
+    size_t payload_len;
+    size_t sent_bytes;
+    size_t received_bytes;
+    size_t total_size;
+    size_t read_len;
+    uint8_t seq;
+    uint8_t exit_data[4];
+    UDSErr_t err;
+    int rc = -1;
+
+    if (tp == NULL || cfg == NULL) {
+        return -1;
+    }
+    if (cfg->file_local_upload[0] == '\0' || cfg->file_local_download[0] == '\0') {
+        fprintf(stderr, "[client_smoke] file smoke requires UDS_SMOKE_FILE_LOCAL_UPLOAD and UDS_SMOKE_FILE_LOCAL_DOWNLOAD\n");
+        return -1;
+    }
+    if (stat(cfg->file_local_upload, &st) != 0) {
+        fprintf(stderr, "[client_smoke] file smoke upload source not found: %s\n", cfg->file_local_upload);
+        return -1;
+    }
+    remote_name = (cfg->file_remote_name[0] != '\0') ? cfg->file_remote_name : smoke_file_basename(cfg->file_local_upload);
+    if (remote_name == NULL || remote_name[0] == '\0') {
+        fprintf(stderr, "[client_smoke] file smoke remote name is empty\n");
+        return -1;
+    }
+    if (smoke_crc32_file(cfg->file_local_upload, &src_crc, &src_size) != 0) {
+        fprintf(stderr, "[client_smoke] file smoke failed to compute source CRC: %s\n", cfg->file_local_upload);
+        return -1;
+    }
+
+    memset(&client, 0, sizeof(client));
+    smoke_request_state_reset(&state);
+    memset(&resp, 0, sizeof(resp));
+    err = UDSClientInit(&client);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file UDSClientInit failed err=%d\n", (int)err);
+        return -1;
+    }
+    client.tp = uds_transport_get_tp_handle(tp);
+    client.fn = smoke_request_event_handler;
+    client.fn_data = &state;
+    smoke_apply_client_timing(&client, timing);
+    if (client.tp == NULL) {
+        fprintf(stderr, "[client_smoke] file transport handle is NULL\n");
+        return -1;
+    }
+
+    printf("[client_smoke] file smoke enabled upload=%s remote=%s download=%s timeout_ms=%lu\n",
+           cfg->file_local_upload,
+           remote_name,
+           cfg->file_local_download,
+           (unsigned long)cfg->file_timeout_ms);
+
+    fp = fopen(cfg->file_local_upload, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "[client_smoke] file smoke failed to open upload source: %s\n", cfg->file_local_upload);
+        return -1;
+    }
+
+    smoke_request_state_reset(&state);
+    err = UDSSendRequestFileTransfer(&client,
+                                     SMOKE_DEFAULT_MOOP_ADD_FILE,
+                                     remote_name,
+                                     0x00u,
+                                     4u,
+                                     src_size,
+                                     src_size);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file upload init send failed err=%d\n", (int)err);
+        goto cleanup;
+    }
+    if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0) {
+        fprintf(stderr, "[client_smoke] file upload init failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                (int)state.last_err,
+                state.last_nrc,
+                state.response_sid,
+                uds_transport_get_last_error(tp));
+        goto cleanup;
+    }
+    client.recv_size = state.recv_size;
+    if (client.recv_size > 0u) {
+        memcpy(client.recv_buf, state.recv_buf, client.recv_size);
+    }
+    if (UDSUnpackRequestFileTransferResponse(&client, &resp) != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file upload init unpack failed\n");
+        goto cleanup;
+    }
+    max_chunk = resp.maxNumberOfBlockLength;
+    if (max_chunk < 3u) {
+        fprintf(stderr, "[client_smoke] file upload invalid maxNumberOfBlockLength=%lu\n",
+                (unsigned long)max_chunk);
+        goto cleanup;
+    }
+    if (max_chunk > (sizeof(buffer) + 2u)) {
+        max_chunk = sizeof(buffer) + 2u;
+    }
+    payload_len = max_chunk - 2u;
+    sent_bytes = 0u;
+    seq = 1u;
+    while (sent_bytes < src_size) {
+        read_len = fread(buffer, 1u, payload_len, fp);
+        if (read_len == 0u) {
+            if (ferror(fp)) {
+                fprintf(stderr, "[client_smoke] file upload read failed after %lu bytes\n",
+                        (unsigned long)sent_bytes);
+                goto cleanup;
+            }
+            break;
+        }
+        smoke_request_state_reset(&state);
+        err = UDSSendTransferData(&client, seq, (uint16_t)(read_len + 2u), buffer, (uint16_t)read_len);
+        if (err != UDS_OK) {
+            fprintf(stderr, "[client_smoke] file upload block %u send failed err=%d\n",
+                    (unsigned)seq,
+                    (int)err);
+            goto cleanup;
+        }
+        if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0) {
+            fprintf(stderr, "[client_smoke] file upload block %u failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                    (unsigned)seq,
+                    (int)state.last_err,
+                    state.last_nrc,
+                    state.response_sid,
+                    uds_transport_get_last_error(tp));
+            goto cleanup;
+        }
+        if (state.recv_size < 2u || state.response_sid != 0x76u || state.response_subfn != seq) {
+            fprintf(stderr, "[client_smoke] file upload block %u invalid response sid=0x%02X seq=0x%02X size=%u\n",
+                    (unsigned)seq,
+                    state.response_sid,
+                    state.response_subfn,
+                    (unsigned)state.recv_size);
+            goto cleanup;
+        }
+        sent_bytes += read_len;
+        ++seq;
+    }
+    fclose(fp);
+    fp = NULL;
+
+    exit_data[0] = (uint8_t)((src_crc >> 24) & 0xFFu);
+    exit_data[1] = (uint8_t)((src_crc >> 16) & 0xFFu);
+    exit_data[2] = (uint8_t)((src_crc >> 8) & 0xFFu);
+    exit_data[3] = (uint8_t)(src_crc & 0xFFu);
+    smoke_request_state_reset(&state);
+    err = UDSSendRequestTransferExit(&client, exit_data, 4u);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file upload exit send failed err=%d\n", (int)err);
+        goto cleanup;
+    }
+    if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0 || state.response_sid != 0x77u) {
+        fprintf(stderr, "[client_smoke] file upload exit failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                (int)state.last_err,
+                state.last_nrc,
+                state.response_sid,
+                uds_transport_get_last_error(tp));
+        goto cleanup;
+    }
+    printf("[client_smoke] file upload ok size=%lu crc=0x%08lX\n",
+           (unsigned long)src_size,
+           (unsigned long)src_crc);
+
+    fp = fopen(cfg->file_local_download, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "[client_smoke] file smoke failed to open download target: %s\n", cfg->file_local_download);
+        goto cleanup;
+    }
+
+    smoke_request_state_reset(&state);
+    err = UDSSendRequestFileTransfer(&client,
+                                     SMOKE_DEFAULT_MOOP_READ_FILE,
+                                     remote_name,
+                                     0x00u,
+                                     0u,
+                                     0u,
+                                     0u);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file download init send failed err=%d\n", (int)err);
+        goto cleanup;
+    }
+    if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0) {
+        fprintf(stderr, "[client_smoke] file download init failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                (int)state.last_err,
+                state.last_nrc,
+                state.response_sid,
+                uds_transport_get_last_error(tp));
+        goto cleanup;
+    }
+    client.recv_size = state.recv_size;
+    if (client.recv_size > 0u) {
+        memcpy(client.recv_buf, state.recv_buf, client.recv_size);
+    }
+    if (UDSUnpackRequestFileTransferResponse(&client, &resp) != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file download init unpack failed\n");
+        goto cleanup;
+    }
+    total_size = resp.fileSizeUncompressed;
+    received_bytes = 0u;
+    dst_crc = 0u;
+    seq = 1u;
+
+    for (;;) {
+        size_t data_len;
+
+        smoke_request_state_reset(&state);
+        err = UDSSendTransferData(&client, seq, 2u, NULL, 0u);
+        if (err != UDS_OK) {
+            fprintf(stderr, "[client_smoke] file download block %u send failed err=%d\n",
+                    (unsigned)seq,
+                    (int)err);
+            goto cleanup;
+        }
+        if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0) {
+            fprintf(stderr, "[client_smoke] file download block %u failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                    (unsigned)seq,
+                    (int)state.last_err,
+                    state.last_nrc,
+                    state.response_sid,
+                    uds_transport_get_last_error(tp));
+            goto cleanup;
+        }
+        if (state.recv_size < 2u || state.response_sid != 0x76u || state.response_subfn != seq) {
+            fprintf(stderr, "[client_smoke] file download block %u invalid response sid=0x%02X seq=0x%02X size=%u\n",
+                    (unsigned)seq,
+                    state.response_sid,
+                    state.response_subfn,
+                    (unsigned)state.recv_size);
+            goto cleanup;
+        }
+        data_len = (size_t)state.recv_size - 2u;
+        if (data_len == 0u) {
+            break;
+        }
+        if (fwrite(&state.recv_buf[2], 1u, data_len, fp) != data_len) {
+            fprintf(stderr, "[client_smoke] file download write failed after %lu bytes\n",
+                    (unsigned long)received_bytes);
+            goto cleanup;
+        }
+        dst_crc = crc32_calc(dst_crc, &state.recv_buf[2], data_len);
+        received_bytes += data_len;
+        ++seq;
+        if (total_size > 0u && received_bytes >= total_size) {
+            break;
+        }
+    }
+
+    smoke_request_state_reset(&state);
+    err = UDSSendRequestTransferExit(&client, NULL, 0u);
+    if (err != UDS_OK) {
+        fprintf(stderr, "[client_smoke] file download exit send failed err=%d\n", (int)err);
+        goto cleanup;
+    }
+    if (smoke_wait_for_request_result(&client, &state, cfg->file_timeout_ms) != 0 || state.response_sid != 0x77u) {
+        fprintf(stderr, "[client_smoke] file download exit failed err=%d nrc=0x%02X resp_sid=0x%02X last_error=%d\n",
+                (int)state.last_err,
+                state.last_nrc,
+                state.response_sid,
+                uds_transport_get_last_error(tp));
+        goto cleanup;
+    }
+    fclose(fp);
+    fp = NULL;
+
+    if (smoke_crc32_file(cfg->file_local_download, &dst_crc, &dst_size) != 0) {
+        fprintf(stderr, "[client_smoke] file smoke failed to compute download CRC: %s\n", cfg->file_local_download);
+        goto cleanup;
+    }
+    if (dst_size != src_size || dst_crc != src_crc) {
+        fprintf(stderr, "[client_smoke] file smoke compare mismatch src_size=%lu dst_size=%lu src_crc=0x%08lX dst_crc=0x%08lX\n",
+                (unsigned long)src_size,
+                (unsigned long)dst_size,
+                (unsigned long)src_crc,
+                (unsigned long)dst_crc);
+        goto cleanup;
+    }
+
+    printf("[client_smoke] file download ok size=%lu crc=0x%08lX\n",
+           (unsigned long)dst_size,
+           (unsigned long)dst_crc);
+    rc = 0;
+
+cleanup:
+    if (fp != NULL) {
+        fclose(fp);
+    }
+    if (rc != 0) {
+        remove(cfg->file_local_download);
+    }
+    return rc;
 }
 
 static void smoke_session_state_reset(smoke_session_state_t *state, uint8_t expected_session)
@@ -881,7 +1822,7 @@ static int smoke_wait_for_session_result(UDSClient_t *client, smoke_session_stat
     return (state->last_err == UDS_OK) ? 0 : -1;
 }
 
-static int smoke_run_session_sequence(uds_transport_t *tp, const smoke_settings_t *cfg)
+static int smoke_run_session_sequence(uds_transport_t *tp, const smoke_settings_t *cfg, smoke_client_timing_t *timing)
 {
     UDSClient_t client;
     smoke_session_state_t state;
@@ -940,13 +1881,20 @@ static int smoke_run_session_sequence(uds_transport_t *tp, const smoke_settings_
                     uds_transport_get_last_error(tp));
             return -1;
         }
+        if (timing != NULL) {
+            timing->valid = 1;
+            timing->p2_ms = client.p2_ms;
+            timing->p2_star_ms = client.p2_star_ms;
+        }
 
-        printf("[client_smoke] session attempt %lu/%lu ok sid=0x%02X resp_sid=0x%02X resp_sub=0x%02X\n",
+        printf("[client_smoke] session attempt %lu/%lu ok sid=0x%02X resp_sid=0x%02X resp_sub=0x%02X p2=%lu p2*=%lu\n",
                (unsigned long)(attempt + 1u),
                (unsigned long)cfg->session_repeat,
                (unsigned)cfg->session_id,
                state.response_sid,
-               state.response_subfn);
+               state.response_subfn,
+               (unsigned long)client.p2_ms,
+               (unsigned long)client.p2_star_ms);
 
         if (attempt + 1u < cfg->session_repeat && cfg->session_gap_ms > 0u) {
             platform_sleep_ms(cfg->session_gap_ms);
@@ -962,11 +1910,13 @@ int main(void)
     unsigned char storage[UDS_TRANSPORT_STORAGE_CAPACITY];
     uds_transport_open_cfg_t open_cfg;
     smoke_settings_t smoke_cfg;
+    smoke_client_timing_t timing;
     int rc;
 
     smoke_settings_init_defaults(&smoke_cfg);
     smoke_try_load_default_conf(&smoke_cfg);
     smoke_settings_apply_env(&smoke_cfg);
+    memset(&timing, 0, sizeof(timing));
 
     memset(&open_cfg, 0, sizeof(open_cfg));
     open_cfg.phys_sa = smoke_cfg.phys_rx_id;
@@ -1095,7 +2045,16 @@ int main(void)
     printf("[client_smoke] first poll rc=%d last_error=%d\n", rc, uds_transport_get_last_error(&tp));
 
     if (rc == 0 && smoke_cfg.run_session_smoke) {
-        rc = smoke_run_session_sequence(&tp, &smoke_cfg);
+        rc = smoke_run_session_sequence(&tp, &smoke_cfg, &timing);
+    }
+    if (rc == 0 && smoke_cfg.run_security_smoke) {
+        rc = smoke_run_security_sequence(&tp, &smoke_cfg, &timing);
+    }
+    if (rc == 0 && smoke_cfg.run_rexec_smoke) {
+        rc = smoke_run_rexec_sequence(&tp, &smoke_cfg, &timing);
+    }
+    if (rc == 0 && smoke_cfg.run_file_smoke) {
+        rc = smoke_run_file_sequence(&tp, &smoke_cfg, &timing);
     }
 
     uds_transport_close(&tp);

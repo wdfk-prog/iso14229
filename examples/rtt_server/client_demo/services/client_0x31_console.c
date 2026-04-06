@@ -241,21 +241,22 @@ static void handle_console_response(UDSClient_t *client)
 {
     uint16_t rid;
     const char *payload;
-    int len;
-    int i;
+    size_t len;
+    size_t i;
     char *buf_copy;
 
-    if (client->recv_size <= 4) return;
+    if (client == NULL || client->recv_size < 4u) return;
+    if (client->recv_buf[0] != (0x40u + 0x31u)) return;
 
     rid = ((uint16_t)client->recv_buf[2] << 8) | client->recv_buf[3];
     if (rid != RID_REMOTE_CONSOLE) return;
 
     payload = (const char *)&client->recv_buf[4];
-    len = client->recv_size - 4;
+    len = (size_t)client->recv_size - 4u;
 
     /* 1. Print Output (if not silent) */
     if (!g_silent_mode) {
-        for (i = 0; i < len; i++) {
+        for (i = 0u; i < len; i++) {
             /* Fix raw mode newline behavior */
             if (payload[i] == '\n') putchar('\r');
             putchar(payload[i]);
@@ -264,11 +265,11 @@ static void handle_console_response(UDSClient_t *client)
     }
 
     /* 2. Parse Output for Cache/State Updates */
-    buf_copy = malloc(len + 1);
+    buf_copy = malloc(len + 1u);
     if (buf_copy) {
         memcpy(buf_copy, payload, len);
         buf_copy[len] = '\0';
-        
+
         if (g_expecting_help) {
             parse_help_output(buf_copy);
             /* Keep expecting_help set until sync function clears it or new command sent */
@@ -279,6 +280,7 @@ static void handle_console_response(UDSClient_t *client)
         free(buf_copy);
     }
 }
+
 
 /* ==========================================================================
  * Sending Logic

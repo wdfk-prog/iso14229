@@ -10,6 +10,11 @@
  *   forwarded to `isotp_on_can_message(...)` before the original ISO-TP poll.
  */
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include "transport.h"
 
 #include <ctype.h>
@@ -18,11 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
 #ifndef UDS_TP_ISOTP_C
 #error "pycan_bridge backend requires UDS_TP_ISOTP_C for Windows builds"

@@ -102,6 +102,44 @@ static int handle_lls(int argc, char **argv)
  * ========================================================================== */
 
 /**
+ * @brief Waits for a transfer-stage response and normalizes timeout / NRC handling.
+ */
+static int wait_transfer_stage(UDSClient_t *client, uint32_t timeout_ms, const char *stage)
+{
+    uint32_t t_start;
+    uint8_t nrc;
+
+    if (client == NULL || timeout_ms == 0u) {
+        return -1;
+    }
+
+    t_start = sys_tick_get_ms();
+    while (client->state != 0) {
+        uds_poll();
+        if (sys_tick_get_ms() - t_start > timeout_ms) {
+            printf("\n");
+            LOG_ERROR("%s Timeout after %lu ms", stage, (unsigned long)timeout_ms);
+            return -1;
+        }
+    }
+
+    nrc = uds_get_last_nrc();
+    if (nrc != 0u) {
+        printf("\n");
+        LOG_ERROR("%s Error: 0x%02X", stage, nrc);
+        return -1;
+    }
+
+    if (client->recv_size == 0u) {
+        printf("\n");
+        LOG_ERROR("%s Empty response", stage);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
  * @brief Handles the 'sy' (Send Y-modem style) upload command.
  * @details Initiates a UDS Upload sequence:
  *          1. 0x38 RequestFileTransfer (AddFile)
@@ -112,6 +150,7 @@ static int handle_upload(int argc, char **argv)
 {
     const char *filename;
     FILE *fp;
+    long file_pos;
     size_t filesize;
     UDSClient_t *client;
     struct RequestFileTransferResponse resp = {0};
@@ -122,8 +161,6 @@ static int handle_upload(int argc, char **argv)
     size_t sent_bytes = 0;
     uint32_t crc = 0;
     size_t read_len;
-    uint32_t t_start;
-    uint8_t nrc;
     uint8_t exit_data[4];
 
     if (argc < 2) return 0;
@@ -136,9 +173,19 @@ static int handle_upload(int argc, char **argv)
     }
 
     /* Calculate file size */
-    fseek(fp, 0, SEEK_END);
-    filesize = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        LOG_ERROR("Failed to seek file: %s", filename);
+        return -1;
+    }
+    file_pos = ftell(fp);
+    if (file_pos < 0) {
+        fclose(fp);
+        LOG_ERROR("Failed to query file size: %s", filename);
+        return -1;
+    }
+    filesize = (size_t)file_pos;
+    (void)fseek(fp, 0, SEEK_SET);
 
     LOG_INFO("Uploading '%s' (%lu bytes)...", filename, (unsigned long)filesize);
     client = uds_get_client();
@@ -150,33 +197,53 @@ static int handle_upload(int argc, char **argv)
     }
 
     /* Determine block size from response */
-    UDSUnpackRequestFileTransferResponse(client, &resp);
-    max_chunk = (resp.maxNumberOfBlockLength < 3) ? 4095 : resp.maxNumberOfBlockLength;
-    payload_len = max_chunk - 2; /* Subtract SID (1) + Sequence (1) */
+    if (UDSUnpackRequestFileTransferResponse(client, &resp) != UDS_OK) {
+        fclose(fp);
+        LOG_ERROR("Invalid RequestFileTransfer response");
+        return -1;
+    }
+    max_chunk = resp.maxNumberOfBlockLength;
+    if (max_chunk < 3u) {
+        fclose(fp);
+        LOG_ERROR("Invalid maxNumberOfBlockLength: %lu", (unsigned long)max_chunk);
+        return -1;
+    }
+    if (max_chunk > (sizeof(buffer) + 2u)) {
+        max_chunk = sizeof(buffer) + 2u;
+    }
+    payload_len = max_chunk - 2u; /* Subtract SID (1) + Sequence (1) */
     
     /* 2. Transfer Loop: 0x36 TransferData */
     while (sent_bytes < filesize) {
         read_len = fread(buffer, 1, payload_len, fp);
-        if (read_len == 0) break;
+        if (read_len == 0u) {
+            if (ferror(fp)) {
+                printf("\n");
+                LOG_ERROR("Read failed while uploading '%s'", filename);
+                fclose(fp);
+                return -1;
+            }
+            break;
+        }
         
         crc = crc32_calc(crc, buffer, read_len);
 
         uds_prepare_request(); /* Clear flags */
-        UDSSendTransferData(client, seq, (uint16_t)(read_len + 2), buffer, (uint16_t)read_len);
-
-        /* Custom wait loop for speed (no spinner animation to reduce overhead) */
-        t_start = sys_tick_get_ms();
-        while (client->state != 0) { 
-             uds_poll();
-             if (sys_tick_get_ms() - t_start > 2000) break; /* 2s timeout per block */
+        if (UDSSendTransferData(client, seq, (uint16_t)(read_len + 2u), buffer, (uint16_t)read_len) != UDS_OK) {
+            printf("\n");
+            LOG_ERROR("Failed to send block %u", (unsigned)seq);
+            fclose(fp);
+            return -1;
         }
-        
-        /* Check NRC */
-        nrc = uds_get_last_nrc();
-        if (nrc != 0) {
-            printf("\n"); 
-            LOG_ERROR("Block %d Error: 0x%02X", seq, nrc);
-            fclose(fp); 
+
+        if (wait_transfer_stage(client, 2000u, "Upload block") != 0) {
+            fclose(fp);
+            return -1;
+        }
+        if (client->recv_size < 2u || client->recv_buf[0] != 0x76u || client->recv_buf[1] != seq) {
+            printf("\n");
+            LOG_ERROR("Unexpected TransferData response for block %u", (unsigned)seq);
+            fclose(fp);
             return -1;
         }
 
@@ -218,9 +285,8 @@ static int handle_download(int argc, char **argv)
     size_t received_bytes = 0;
     uint32_t crc = 0;
     int eof = 0;
-    uint32_t t_start;
-    uint8_t nrc;
-    int data_len;
+    size_t data_len;
+    int rc = -1;
 
     if (argc < 2) return 0;
     
@@ -235,39 +301,40 @@ static int handle_download(int argc, char **argv)
 
     /* 1. Request: 0x38 ReadFile */
     if (UDS_TRANSACTION(UDSSendRequestFileTransfer(client, MOOP_READ_FILE, filename, 0x00, 0, 0, 0), "Initializing") != 0) {
-        fclose(fp); 
-        remove(filename); 
-        return -1;
+        goto cleanup;
     }
 
-    UDSUnpackRequestFileTransferResponse(client, &resp);
+    if (UDSUnpackRequestFileTransferResponse(client, &resp) != UDS_OK) {
+        LOG_ERROR("Invalid RequestFileTransfer response");
+        goto cleanup;
+    }
     total_size = resp.fileSizeUncompressed;
     LOG_INFO("Remote File Size: %lu bytes", (unsigned long)total_size);
 
     /* 2. Transfer Loop: 0x36 TransferData */
     while (!eof) {
         uds_prepare_request();
-        UDSSendTransferData(client, seq, 2, NULL, 0); /* Request next block */
-
-        t_start = sys_tick_get_ms();
-        while (client->state != 0) {
-            uds_poll();
-            if (sys_tick_get_ms() - t_start > 3000) break;
+        if (UDSSendTransferData(client, seq, 2, NULL, 0) != UDS_OK) {
+            LOG_ERROR("Failed to request block %u", (unsigned)seq);
+            goto cleanup;
         }
 
-        nrc = uds_get_last_nrc();
-        if (nrc != 0) {
-            printf("\n"); 
-            LOG_ERROR("Transfer Error: 0x%02X", nrc);
-            fclose(fp); 
-            return -1;
+        if (wait_transfer_stage(client, 3000u, "Download block") != 0) {
+            goto cleanup;
+        }
+        if (client->recv_size < 2u || client->recv_buf[0] != 0x76u || client->recv_buf[1] != seq) {
+            LOG_ERROR("Unexpected TransferData response for block %u", (unsigned)seq);
+            goto cleanup;
         }
 
         /* Extract Data: [SID] [Seq] [Data...] */
-        data_len = client->recv_size - 2;
+        data_len = (size_t)client->recv_size - 2u;
         
-        if (data_len > 0) {
-            fwrite(&client->recv_buf[2], 1, data_len, fp);
+        if (data_len > 0u) {
+            if (fwrite(&client->recv_buf[2], 1, data_len, fp) != data_len) {
+                LOG_ERROR("Write failed while downloading '%s'", filename);
+                goto cleanup;
+            }
             crc = crc32_calc(crc, &client->recv_buf[2], data_len);
             received_bytes += data_len;
             
@@ -275,7 +342,7 @@ static int handle_download(int argc, char **argv)
             
             seq++;
             /* Check for EOF based on size if known */
-            if (total_size > 0 && received_bytes >= total_size) {
+            if (total_size > 0u && received_bytes >= total_size) {
                 eof = 1;
             }
         } else {
@@ -284,14 +351,19 @@ static int handle_download(int argc, char **argv)
         }
     }
     printf("\n");
-    fclose(fp);
 
     /* 3. Exit: 0x37 */
     if (UDS_TRANSACTION(UDSSendRequestTransferExit(client, NULL, 0), "Finalizing") == 0) {
         LOG_INFO("Download Complete. Local CRC: 0x%08X", crc);
-        return 0;
+        rc = 0;
     }
-    return -1;
+
+cleanup:
+    fclose(fp);
+    if (rc != 0) {
+        remove(filename);
+    }
+    return rc;
 }
 
 /* ==========================================================================
