@@ -1,437 +1,246 @@
 [中文](README_ZN.md)
 
-## 1. Project Overview
+# RT-Thread UDS Server and Client Demo
 
-An implementation of the ISO 14229 (Unified Diagnostic Services, UDS) diagnostic tool based on the RT-Thread operating system, comprising a server and a client. The server runs on an embedded device and communicates with the client via the CAN bus, implementing various UDS diagnostic services to facilitate remote diagnosis and control of embedded devices.
+Reference project for **RT-Thread UDS server integration** and **host-side UDS client execution**.
 
-This project aims to provide RT-Thread users with a complete UDS diagnostic solution that can be used directly or serve as a reference for learning the UDS protocol and developing custom diagnostic functions.
+This repository is organized around one goal: keep the **UDS / ISO-TP business logic in C**, keep the **RT-Thread server integration isolated in `server_demo/`**, and let each host platform use the transport path that best matches its native environment.
 
-### Main Features
-- Based on the RT-Thread operating system, fully utilizing its multitasking and device driver framework.
-- Implements commonly used UDS diagnostic services to meet most diagnostic requirements.
-- Provides a cross-platform Linux client for convenient interaction with the server.
-- Modular design, making it easy to extend with new UDS services.
-- Includes rich sample code to help users get started quickly.
+## Documentation map
 
-### Application Scenarios
-- Automotive ECU diagnostics
-- Remote maintenance of industrial controllers
-- Firmware upgrades for embedded devices
-- Device status monitoring and troubleshooting
+- [Chinese README](README_ZN.md)
+- [Architecture Overview](docs/architecture.md)
+- [API Reference](docs/api-reference.md)
+- [Linux Build and Run Guide](docs/linux-build.md)
+- [Windows Build Guide](docs/windows-build.md)
+- [Python / pip Workflow for `PYCAN_BRIDGE`](docs/pycan-pip-workflow.md)
+- [Server Module Notes](server_demo/README.md)
 
----
+## Repository layout
 
-## 2. Features
-
-### Server Features
-- Multitasking architecture based on RT-Thread, ensuring system stability and real-time performance.
-- Complete implementation of the ISO 14229 UDS protocol stack.
-- Supports multiple UDS diagnostic services, including session control, security access, parameter read/write, etc.
-- Flexible service registration mechanism for easy extension of new features.
-- Seamless integration with RT-Thread CAN device drivers.
-- Supports CAN bus communication control, enabling/disabling message transmission/reception dynamically.
-
-### Client Features
-- Based on the Linux platform, using SocketCAN for CAN communication.
-- Provides a command-line interactive interface with command history and auto-completion.
-- Implements client-side functionality for UDS services that match the server.
-- Supports file upload and download functionality.
-- Supports execution of remote console commands.
-- Features comprehensive error handling and log display capabilities.
-
-### Communication Features
-- CAN bus data transmission protocol based on ISO TP (ISO 15765-2).
-- Supports large data block transmission, suitable for scenarios like file transfers.
-- Equipped with flow control mechanisms to ensure communication stability.
-- Supports both functional addressing and physical addressing communication methods.
-
----
-
-## 3. Supported UDS Services
-
-This project implements the following UDS services defined by the ISO 14229 standard:
-
-| Service ID | Name                          | Description                            |
-|------------|-------------------------------|----------------------------------------|
-| 0x10       | Diagnostic Session Control    | Controls diagnostic session mode (Default/Extended/Programming Session) |
-| 0x11       | ECU Reset                     | Performs ECU reset operation            |
-| 0x22       | Read Data By Identifier       | Reads parameter values corresponding to Data Identifiers |
-| 0x27       | Security Access               | Security access service to unlock advanced diagnostic functions |
-| 0x28       | Communication Control         | Controls communication behavior (Enables/Disables message transmission/reception) |
-| 0x2E       | Write Data By Identifier      | Writes parameter values corresponding to Data Identifiers |
-| 0x2F       | Input/Output Control          | Controls the behavior of input/output signals |
-| 0x31       | Routine Control               | Controls routine start, stop, and result inquiry |
-| 0x34       | Request Download              | Requests downloading data to ECU        |
-| 0x36       | Transfer Data                 | Transfers data blocks                   |
-| 0x37       | Request Transfer Exit         | Ends data transfer                      |
-| 0x38       | Request File Transfer         | Requests file transfer                  |
-| 0x3E       | Tester Present                | Keeps tester online                     |
-
-These services cover the core functionalities of the UDS protocol and can meet the requirements of most diagnostic application scenarios.
-
----
-
-## 4. System Architecture
-
-### Overall Architecture Diagram
-```
-+------------------+        CAN Bus        +------------------+
-|                  | <=================>  |                  |
-|  Linux Client    |                      | RT-Thread Server |
-|                  |                      |                  |
-+------------------+                      +------------------+
-       |                                           |
-       | SocketCAN                                 | RT-Thread CAN Driver
-       |                                           |
-       v                                           v
-+------------------+                      +------------------+
-| UDS Client Stack |                      | UDS Server Stack |
-| (iso14229.c)     |                      | (iso14229_rtt.c) |
-+------------------+                      +------------------+
-       |                                           |
-       | Application Layer                         | Application Layer
-       v                                           v
-+------------------+                      +------------------+
-| Client Services  |                      | Server Services  |
-| (services/)      |                      | (service/)       |
-+------------------+                      +------------------+
+```text
+.
+├── README.md
+├── README_ZN.md
+├── docs/
+│   ├── architecture.md
+│   ├── architecture.zh-CN.md
+│   ├── api-reference.md
+│   ├── api-reference.zh-CN.md
+│   ├── linux-build.md
+│   ├── linux-build.zh-CN.md
+│   ├── windows-build.md
+│   ├── windows-build.zh-CN.md
+│   ├── pycan-pip-workflow.md
+│   └── pycan-pip-workflow.zh-CN.md
+├── iso14229.c
+├── iso14229.h
+├── client_demo/
+│   ├── CMakeLists.txt
+│   ├── CMakePresets.json
+│   ├── Makefile
+│   ├── main.c
+│   ├── core/
+│   ├── platform/
+│   ├── services/
+│   ├── tools/
+│   ├── transport/
+│   └── utils/
+└── server_demo/                  # Git submodule: RT-Thread server-side tree
+    ├── Kconfig
+    ├── SConscript
+    ├── iso14229_rtt.c
+    ├── iso14229_rtt.h
+    ├── rtt_uds_config.h
+    ├── README.md
+    └── README_ZN.md
 ```
 
-### Server Architecture
-The server is based on the RT-Thread operating system and adopts a layered architecture design:
-1. **Hardware Abstraction Layer**: RT-Thread CAN device driver
-2. **Transport Layer**: ISO TP protocol implementation
-3. **Protocol Layer**: ISO 14229 core protocol stack (`[iso14229_rtt.c]`)
-4. **Service Layer**: Specific implementations of various UDS services (`service/`)
-5. **Application Layer**: User-defined application logic (`[rtt_uds_example.c]`)
+## Submodule note for `server_demo/`
 
-### Client Architecture
-The client is based on the Linux platform and also adopts a layered architecture design:
-1. **Hardware Abstraction Layer**: SocketCAN interface
-2. **Transport Layer**: ISO TP protocol implementation
-3. **Protocol Layer**: ISO 14229 core protocol stack (`[iso14229.c]`)
-4. **Service Layer**: Client implementations of various UDS services (`services/`)
-5. **Application Layer**: Command-line interactive interface and user command processing (`core/`, `[main.c]`)
+`server_demo/` is treated as an independently maintained Git submodule. In this repository, the directory should be **used and documented**, but its contents should not be rewritten from the superproject side.
 
----
-
-## 5. Code Structure
-
-### Server Code Structure
-```
-server_demo/
-├── examples/                    # Sample Applications
-│   └── rtt_uds_example.c       # RT-Thread UDS Server Example
-├── service/                     # UDS Service Implementations
-│   ├── rtt_uds_service.h       # Service Definition Macros and APIs
-│   ├── service_0x10_session.c  # 0x10 Diagnostic Session Control Service
-│   ├── service_0x11_reset.c    # 0x11 ECU Reset Service
-│   ├── service_0x22_0x2E_param.c # 0x22/0x2E Parameter Read/Write Service
-│   ├── service_0x27_security.c # 0x27 Security Access Service
-│   ├── service_0x28_comm.c     # 0x28 Communication Control Service
-│   ├── service_0x2F_io.c       # 0x2F Input/Output Control Service
-│   ├── service_0x31_console.c  # 0x31 Remote Console Service
-│   └── service_0x36_0x37_0x38_file.c # 0x36/0x37/0x38 File Transfer Service
-├── iso14229_rtt.c              # UDS Protocol Core Implementation (RT-Thread Version)
-├── iso14229_rtt.h              # UDS Protocol Core Header File
-└── rtt_uds_config.h            # RT-Thread Platform Configuration File
-```
-
-### Client Code Structure
-```
-client_demo/
-├── core/                        # Core Modules
-│   ├── client.h                # Client Common Header File
-│   ├── client_config.c/h       # Client Configuration Management
-│   ├── client_shell.c/h        # Command-Line Interactive Interface
-│   ├── cmd_registry.c/h        # Command Registration Management
-│   ├── response_registry.c/h   # Response Registration Management
-│   └── uds_context.c/h         # UDS Context Management
-├── services/                    # UDS Service Client Implementations
-│   ├── client_0x10_session.c   # 0x10 Diagnostic Session Control Client
-│   ├── client_0x11_reset.c     # 0x11 ECU Reset Client
-│   ├── client_0x22_0x2E_param.c # 0x22/0x2E Parameter Read/Write Client
-│   ├── client_0x27_security.c  # 0x27 Security Access Client
-│   ├── client_0x28_comm.c      # 0x28 Communication Control Client
-│   ├── client_0x2F_io.c        # 0x2F Input/Output Control Client
-│   ├── client_0x31_console.c   # 0x31 Remote Console Client
-│   └── client_0x36_0x37_0x38_file.c # 0x36/0x37/0x38 File Transfer Client
-├── utils/                       # Utility Modules
-│   ├── linenoise.c/h           # Command-Line Editing Library
-│   └── utils.c/h               # General Utility Functions
-├── main.c                      # Main Program Entry Point
-└── Makefile                    # Build Script
-```
-
----
-
-## 6. Hardware Requirements
-
-### Server Side
-- An embedded development board running the RT-Thread operating system.
-- At least one hardware interface with a CAN controller.
-- Connected to a CAN transceiver (e.g., TJA1050, SN65HVD230).
-- GPIO pins for the LED control example (optional).
-
-### Client Side
-- A host machine (physical or virtual) running the Linux operating system.
-- A SocketCAN-compatible CAN interface adapter.
-  - USB-to-CAN adapter (e.g., USBCAN-I, USBCAN-II).
-  - PCIe CAN interface card.
-  - Development board with a CAN controller (e.g., Raspberry Pi with MCP2515).
-- CAN bus connection cables and termination resistors.
-
----
-
-## 7. Getting Started
-
-### Server Setup
-
-1. **Configuration**
-    - Enable the package in RT-Thread's `menuconfig`:
-
-    ```sh
-    RT-Thread online packages  --->
-        peripherals packages  --->
-            [*] Enable iso14229 (UDS) library  --->
-                (32) Event Dispatch Table Size
-                [*] Enable UDS server example application
-    ```
-
-2. **Library Integration**
-   - Add the source files from the `server_demo` directory to your RT-Thread project.
-   - Ensure CAN device driver support is enabled in your project configuration.
-
-3. **Compilation and Flashing**
-   - Compile the project using the toolchain supported by RT-Thread.
-   - Flash the generated firmware to the target hardware.
-
-4. **Running the Example**
-   - Connect to the device console via a serial terminal.
-   - Start the UDS server example:
-     ```
-     msh />uds_example start can1
-     ```
-
-### Client Setup
-
-1. **Configure SocketCAN**
-   - Enable and configure the CAN interface on the Linux host:
-     ```bash
-     # Load CAN modules (if needed)
-     sudo modprobe can
-     sudo modprobe can_raw
-     sudo modprobe vcan  # For virtual CAN testing
-
-     # Configure a physical CAN interface (e.g., at 1 Mbps)
-     sudo ip link set can0 up type can bitrate 1000000
-
-     # Or create a virtual CAN interface for testing
-     sudo ip link add dev vcan0 type vcan
-     sudo ip link set up vcan0
-     ```
-
-2. **Compile the Client**
-   - Navigate to the `client_demo` directory.
-   - Default path (native build with CMake):
-     ```bash
-     mkdir -p build
-     cd build
-     cmake ..
-     cmake --build . -j
-     ```
-   - Cross-compilation (explicit toolchain file):
-     ```bash
-     mkdir -p build
-     cd build
-     cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
-     cmake --build . -j
-     ```
-   - Optional deploy helper target (`download`):
-     default remote run command: `./client -i can1 -s 7D1 -t 7E1 -f 7E0`
-     ```bash
-     mkdir -p build
-     cd build
-     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
-     cmake --build . --target download
-     ```
-   - Optional extra suffix args for remote command:
-     ```bash
-     cmake -DENABLE_DOWNLOAD=ON -DTARGET_IP=172.168.1.130 -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake -DDOWNLOAD_CLIENT_EXTRA_ARGS="--your-extra-args" ..
-     cmake --build . --target download
-     ```
-   - The existing [Makefile](file:///home/embedsky/share/iso14229/examples/rtt_server/client_demo/Makefile) remains available for compatibility.
-
-3. **Run the Client**
-   - Execute the generated client program:
-     ```bash
-     ./client -i can0 -s 7E8 -t 7E0  # Use can0 interface
-     ./client -i vcan0               # Use virtual CAN interface
-     ```
-
----
-
-## 8. Usage
-
-### Server Usage
-
-Control the UDS server via RT-Thread's MSH command-line interface:
+Clone with the submodule populated from the start:
 
 ```bash
-# Start the UDS server
-msh />uds_example start can1
-
-# Stop the UDS server
-msh />uds_example stop can1
-
-# View registered services
-msh />uds_list
+git clone --recurse-submodules <repo-url>
 ```
 
-Once started, the server will listen for diagnostic requests on the specified CAN interface and provide corresponding service functions based on the configuration.
-
-### Client Usage
-
-The client provides an interactive command-line interface supporting various diagnostic commands:
+If the superproject is already cloned, initialize and update the submodule with:
 
 ```bash
-# Start the client (uses can1 interface by default)
-$ ./client
-
-# Start the client and specify interface and addresses
-$ ./client -i vcan0 -s 7E8 -t 7E0
-
-# Common commands after entering the interactive interface:
-UDS> help              # Display help information
-UDS> session 03        # Switch to extended session
-UDS> security 01       # Perform security access (level 01)
-UDS> wdbi 0001 01      # Write value 01 to DID 0001
-UDS> io 0100 03 01 00 00  # Control IO (Force red LED)
-UDS> sy local_file.bin # Upload file to server
-UDS> ry remote_file.bin # Download file from server
-UDS> rexec ps          # Execute command on server
-UDS> cd /              # Change directory on server
-UDS> lls               # List local files
-UDS> exit              # Exit the client
+git submodule update --init --recursive
 ```
 
----
+If the submodule URL or branch mapping changes upstream, resync before updating:
 
-## 9. Service Details
-
-### 0x10 Diagnostic Session Control
-Controls the ECU's diagnostic session mode. Different session modes have varying security levels and functional access permissions:
-- Default Session (0x01): Basic diagnostic functions.
-- Programming Session (0x02): Used for firmware flashing.
-- Extended Session (0x03): Accesses more diagnostic functions.
-
-### 0x27 Security Access
-Protects sensitive diagnostic functions using a seed-key mechanism:
-1. Client requests a seed for a specific security level.
-2. Server returns a random seed value.
-3. Client calculates the key based on an algorithm.
-4. Client sends the key for verification.
-5. Upon successful verification, the corresponding security level is unlocked.
-
-### 0x2F Input/Output Control
-Controls digital input/output signals of the ECU:
-- Short Term Adjustment: Temporarily changes the IO state.
-- Return Control: Returns IO control authority to the application.
-- Freeze Current State: Locks the current IO state.
-- Reset To Default: Restores the IO to its default state.
-
-### 0x31 Remote Console
-Executes command-line instructions on the server via the UDS service, enabling remote control functionality:
-- Execute any MSH command.
-- Get the command execution result.
-- Supports directory switching and file browsing.
-
-### 0x36/0x37/0x38 File Transfer
-Complete file transfer functionality supporting uploads and downloads:
-1. 0x38 Request File Transfer: Negotiates file transfer parameters.
-2. 0x36 Transfer Data: Transfers file data blocks.
-3. 0x37 Request Transfer Exit: Ends the transfer and verifies integrity.
-
----
-
-## 10. Examples and Logs
-
-### Typical Interaction Log
-
-```sh
-# Client Startup
-$ ./client -i vcan0
-[Config] IF: vcan0 | SA: 0x7E8 | TA: 0x7E0 | FUNC: 0x7DF
-
-[Shell] Interactive Mode Started. Type 'help' or 'exit'.
-
-UDS> 
-
-# Switch to Extended Session
-UDS> session 03
-[I] (940) Session: Requesting Session Control: 0x03
-[+] Switching Session Done.   
-[I] (950) Session: Session Switched Successfully (0x03)
-
-# Perform Security Access
-UDS> security 01
-[I] (1020) Sec: Starting Security Access (Level 0x01)...
-[+] Requesting Seed Done.   
-[I] (1030) Sec: Seed: 0x12345678 -> Key: 0xB791F3D5
-[+] Verifying Key Done.   
-[I] (1040) Sec: Security Access Granted!
-
-# Control LED
-UDS> io 0100 03 01 00 00
-[I] (1120) IO Ctrl: Sending IO Control: DID=0x0100 Param=0x03
-[+] Requesting Done.   
-
-# Upload File
-UDS> sy test.txt
-[*] Uploading 'test.txt' (1024 bytes)...
-[+] Requesting Done.   
-[=>] 1024/1024 bytes
-[+] Finishing Done.   
-[+] Upload Complete.
-
-# Execute Remote Command
-UDS> rexec ps
-[I] (1250) Console: Remote Exec: 'ps'
-msh />ps
- thread  pri  status      sp     stack size max used   left tick  error
------- ---- ------- ---------- ----------  ------  ---------- ---
-tidle   31  ready   0x00000048 0x00000100    28%   0x0000000b 000
-timer    4  suspend 0x00000068 0x00000200    16%   0x00000009 000
-main    10  running 0x00000070 0x00000800    11%   0x0000000b 000
-uds_sr   2  suspend 0x00000070 0x00001000    13%   0x00000014 000
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
 ```
 
----
+## Example convention used across the docs
 
-## 11. Development Guide
+Unless a section explicitly says otherwise, all run examples use the same diagnostic addressing template:
 
-### Adding New UDS Services
-
-1. On the Server:
-   - Create a new service implementation file in the `service/` directory.
-   - Implement the service handler function.
-   - Register the service node with the UDS environment.
-
-2. On the Client:
-   - Create a client implementation file in the `services/` directory.
-   - Implement the command handler function.
-   - Register the command with the command management system.
-
-### Configuration Notes
-
-Key configurations in the client Makefile:
-```makefile
-# Optimize ISO-TP flow control parameters for improved transfer efficiency
-CFLAGS += -DISOTP_FC_BS=0      # Block size set to 0 (No flow control)
-CFLAGS += -DISOTP_FC_STMIN=0   # Minimum separation time set to 0
+```bash
+./client -i can1 -s 7D1 -t 7E1 -f 7E0
 ```
 
-## 12. related links
-- [iso14229 code](https://github.com/driftregion/iso14229/)
-- [iso14229 client demo](https://github.com/wdfk-prog/iso14229/tree/rtt/examples/rtt_server/client_demo)
-- [iso14229 rtt software](https://github.com/wdfk-prog/can_uds)
+That means:
+
+- `can1` is the documented example interface name
+- `7D1` is the tester physical source ID
+- `7E1` is the ECU physical target ID
+- `7E0` is the functional target ID
+
+Windows examples keep the same `-i/-s/-t/-f` block first, then append the `pycan_bridge`-specific options.
+
+## What is in this repository
+
+### `server_demo/`
+
+RT-Thread-side server integration layer:
+
+- RT-Thread adapter for the ISO 14229 core
+- Kconfig switches for service enablement
+- SConscript-based package integration
+- service registration / dispatch model for RT-Thread handlers
+
+### `client_demo/`
+
+Host-side client with two platform tracks:
+
+- **Linux**: native SocketCAN + Linux ISO-TP socket path
+- **Windows**: MSYS2-built C client + `python-can` sidecar bridge
+
+The Windows tree still keeps a **legacy `TSMASTER_API` smoke path**, but the primary documentation and presets now treat **`PYCAN_BRIDGE` as the default implementation path**.
+
+## Architecture snapshot
+
+```mermaid
+flowchart LR
+    subgraph Server[RT-Thread Target]
+        CANDRV[RT-Thread CAN Driver]
+        RTTADP[server_demo/iso14229_rtt.c]
+        SVCDISP[Service Dispatch]
+        UDS_SRV[ISO 14229 Server Core]
+        CANDRV <--> RTTADP
+        RTTADP <--> UDS_SRV
+        UDS_SRV <--> SVCDISP
+    end
+
+    subgraph Linux[Linux Host]
+        LCLI[client_demo/main.c]
+        LSHELL[core/client_shell.c + linenoise]
+        LCTX[core/uds_context.c]
+        LTP[transport_socketcan.c]
+        KISOTP[Linux SocketCAN ISO-TP]
+        LCLI --> LSHELL --> LCTX --> LTP --> KISOTP
+    end
+
+    subgraph Windows[Windows Host]
+        WCLI[client_demo/main.c]
+        WSHELL[core/client_shell_windows.c]
+        WCTX[core/uds_context.c]
+        WTP[transport_pycan_bridge.c]
+        IPC[stdio JSONL IPC]
+        PYBRIDGE[tools/pycan_bridge.py]
+        PYCAN[python-can]
+        DEV[gs_usb / slcan]
+        WCLI --> WSHELL --> WCTX --> WTP --> IPC --> PYBRIDGE --> PYCAN --> DEV
+    end
+```
+
+See [Architecture Overview](docs/architecture.md) for the detailed rationale, runtime flow, component responsibilities, and platform trade-offs.
+
+## Why the repository is split this way
+
+### Linux
+
+Linux already provides a native SocketCAN stack and ISO-TP socket API, so the client can stay entirely in C and bind directly to the host CAN interface.
+
+### Windows
+
+The repository already contains a Windows C build skeleton, but raw CAN hardware access is more adapter-specific. The project therefore keeps:
+
+- a **formal client binary** built by **MSYS2 MINGW64**
+- a **Python sidecar** for CAN adapter access through `python-can`
+- a **legacy TSMaster smoke target** for SDK-bound environments only
+
+### `gs_usb` and `slcan`
+
+The current Python bridge intentionally exposes only two adapter families:
+
+- `gs_usb`: USB CAN adapters supported by the `gs_usb` stack
+- `slcan`: serial / LAWICEL style adapters exposed as COM ports or serial URLs
+
+This gives one USB-oriented path and one serial-oriented fallback without inflating the bridge surface prematurely.
+
+## Build matrix
+
+| Scenario | Entry point | Recommended document |
+| --- | --- | --- |
+| RT-Thread server integration | `server_demo/` | [Server Module Notes](server_demo/README.md) |
+| Linux native build | `client_demo/CMakeLists.txt` | [Linux Build and Run Guide](docs/linux-build.md) |
+| Linux compatibility build | `client_demo/Makefile` | [Linux Build and Run Guide](docs/linux-build.md) |
+| Linux cross build | `client_demo/toolchain.cmake` | [Linux Build and Run Guide](docs/linux-build.md) |
+| Windows / MSYS2 build | `client_demo/CMakePresets.json` | [Windows Build Guide](docs/windows-build.md) |
+| Windows Python runtime | `client_demo/tools/` | [Python / pip Workflow](docs/pycan-pip-workflow.md) |
+| Public interfaces and API map | `docs/` | [API Reference](docs/api-reference.md) |
+
+## Quick start
+
+### 1. Server-side integration
+
+Start with [server_demo/README.md](server_demo/README.md).
+
+### 2. Linux client path
+
+```bash
+cd client_demo
+mkdir -p build
+cd build
+cmake ..
+cmake --build . -j
+./client -i can1 -s 7D1 -t 7E1 -f 7E0
+```
+
+See [docs/linux-build.md](docs/linux-build.md) for SocketCAN and runtime details.
+
+### 3. Windows client path
+
+```powershell
+cd client_demo
+cmake --preset windows-pycan-mingw64
+cmake --build --preset build-client-pycan
+cd ..
+.\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if gs_usb --py-channel 0 --bitrate 1000000
+```
+
+See [docs/windows-build.md](docs/windows-build.md) and [docs/pycan-pip-workflow.md](docs/pycan-pip-workflow.md) for the full Windows environment model.
+
+## Service coverage
+
+The current tree contains client or server hooks for the following UDS service groups:
+
+- `0x10` Diagnostic Session Control
+- `0x11` ECU Reset
+- `0x22 / 0x2E` Read / Write Data By Identifier
+- `0x27` Security Access
+- `0x28` Communication Control
+- `0x2A` Periodic data / ULOG adapter path
+- `0x2F` InputOutputControlByIdentifier
+- `0x31` Routine Control / remote console
+- `0x34 / 0x36 / 0x37 / 0x38` Download / transfer / file flow
+- `0x3E` Tester Present in the protocol workflow
+
+## Language variants
+
+- [English README](README.md)
+- [中文 README](README_ZN.md)
+- [Architecture 中文版](docs/architecture.zh-CN.md)
+- [API 中文版](docs/api-reference.zh-CN.md)
+- [Linux Guide 中文版](docs/linux-build.zh-CN.md)
+- [Windows Guide 中文版](docs/windows-build.zh-CN.md)
+- [pip Workflow 中文版](docs/pycan-pip-workflow.zh-CN.md)

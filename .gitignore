@@ -42,4 +42,4 @@ tools/cppcheck/misra_c_2023__headlines_for_cppcheck.txt
 latex/
 **/build-mingw64/
 **/__pycache__/
-examples/rtt_server/client_demo/.uds_history
+**/*.uds_history

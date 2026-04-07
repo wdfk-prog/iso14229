@@ -1,0 +1,4 @@
+[submodule "examples/rtt_server/server_demo"]
+	path = examples/rtt_server/server_demo
+	url = https://github.com/wdfk-prog/can_uds
+	branch = master
