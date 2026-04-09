@@ -3,7 +3,8 @@
 
 Task 3 scope:
 - keep ISO-TP/UDS in C
-- expose only raw CAN/CAN FD control and frame events over JSON Lines
+- expose only raw CAN/CAN FD control and frame events over a compact local IPC
+- use length-prefixed stdio packets for the hot path and TCP JSONL only as a debug fallback
 - work as a standalone process for manual smoke and later Task 4 integration
 """
 from __future__ import annotations
@@ -23,6 +24,8 @@ if __package__ in (None, ""):
 
 from pycan_runtime import (
     PROTOCOL_VERSION,
+    BinaryPacketReader,
+    BinaryPacketWriter,
     BridgeConfigError,
     BusOpenOptions,
     DependencyError,
@@ -49,13 +52,12 @@ class OpenSession:
     use_canfd: bool
     use_brs: bool
     bus: Any
-    bus_lock: threading.Lock
     rx_thread: Optional[threading.Thread]
     stop_event: threading.Event
 
 
 class BridgeServer:
-    def __init__(self, ipc_mode: str, writer: JsonLineWriter) -> None:
+    def __init__(self, ipc_mode: str, writer: Any) -> None:
         self.ipc_mode = ipc_mode
         self.writer = writer
         self.seq = SequenceCounter()
@@ -65,11 +67,11 @@ class BridgeServer:
         self._running = True
         self._peer_io_broken = False
 
-    def emit(self, payload: Dict[str, Any]) -> bool:
+    def emit(self, payload: Dict[str, Any], data: bytes = b"") -> bool:
         if self._peer_io_broken:
             return False
         try:
-            self.writer.write(payload)
+            self.writer.write(payload, data)
             return True
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._peer_io_broken = True
@@ -100,8 +102,7 @@ class BridgeServer:
                 except RuntimeError:
                     pass
             try:
-                with session.bus_lock:
-                    session.bus.shutdown()
+                session.bus.shutdown()
             except Exception as exc:  # pragma: no cover - depends on backend
                 log_stderr(f"bus shutdown warning: {exc}")
         self._state = "CLOSED"
@@ -118,8 +119,7 @@ class BridgeServer:
     def _rx_loop(self, session: OpenSession) -> None:
         while not session.stop_event.is_set():
             try:
-                with session.bus_lock:
-                    msg = session.bus.recv(timeout=0.05)
+                msg = session.bus.recv(timeout=0.05)
             except Exception as exc:
                 if not session.stop_event.is_set():
                     self._abort_session_from_rx_error(session, str(exc))
@@ -127,14 +127,14 @@ class BridgeServer:
             if msg is None:
                 continue
             event = message_to_protocol_dict(msg, seq=self.seq.next())
-            if not self.emit(event):
+            payload = bytes(getattr(msg, "data", b""))
+            if not self.emit(event, payload):
                 break
 
     def _abort_session_from_rx_error(self, session: OpenSession, detail: str) -> None:
         session.stop_event.set()
         try:
-            with session.bus_lock:
-                session.bus.shutdown()
+            session.bus.shutdown()
         except Exception as exc:  # pragma: no cover - depends on backend
             log_stderr(f"bus shutdown warning after RX failure: {exc}")
         with self._protocol_lock:
@@ -189,7 +189,6 @@ class BridgeServer:
             use_canfd=use_canfd,
             use_brs=use_brs,
             bus=bus,
-            bus_lock=threading.Lock(),
             rx_thread=None,
             stop_event=stop_event,
         )
@@ -216,7 +215,7 @@ class BridgeServer:
             }
         )
 
-    def _handle_tx(self, message: Dict[str, Any], reply_to: int) -> None:
+    def _handle_tx(self, message: Dict[str, Any], reply_to: int, packet_data: bytes = b"") -> None:
         session = self._session
         if self._state != "OPEN" or session is None:
             self.emit_error(
@@ -229,10 +228,17 @@ class BridgeServer:
 
         can_id = require_int(message, "can_id", minimum=0)
         extended = require_bool(message, "extended", default=False)
-        fd = require_bool(message, "fd", default=False)
-        brs = require_bool(message, "brs", default=False)
-        rtr = require_bool(message, "rtr", default=False)
-        payload = parse_hex_payload(require_str(message, "data", allow_empty=True, default=""))
+
+        if self.ipc_mode == "stdio":
+            fd = False
+            brs = False
+            rtr = False
+            payload = packet_data
+        else:
+            fd = require_bool(message, "fd", default=False)
+            brs = require_bool(message, "brs", default=False)
+            rtr = require_bool(message, "rtr", default=False)
+            payload = parse_hex_payload(require_str(message, "data", allow_empty=True, default=""))
 
         if fd or brs:
             self.emit_error(
@@ -254,8 +260,7 @@ class BridgeServer:
                 rtr=rtr,
                 data=payload,
             )
-            with session.bus_lock:
-                session.bus.send(frame)
+            session.bus.send(frame)
         except (DependencyError, BridgeConfigError, Exception) as exc:
             self.emit_error(
                 code="BUS_SEND_FAILED",
@@ -265,16 +270,7 @@ class BridgeServer:
             )
             return
 
-        self.emit(
-            {
-                "type": "tx_done",
-                "seq": self.seq.next(),
-                "reply_to": reply_to,
-                "status": "ok",
-            }
-        )
-
-    def handle_message(self, message: Dict[str, Any]) -> bool:
+    def handle_message(self, message: Dict[str, Any], packet_data: bytes = b"") -> bool:
         if not isinstance(message, dict):
             raise ProtocolError("top-level JSON value must be an object")
 
@@ -326,7 +322,7 @@ class BridgeServer:
                 return True
 
             if msg_type == "tx":
-                self._handle_tx(message, msg_seq)
+                self._handle_tx(message, msg_seq, packet_data)
                 return True
 
             if msg_type == "close":
@@ -349,15 +345,15 @@ class BridgeServer:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="python-can bridge sidecar for the C UDS client")
-    parser.add_argument("--ipc", choices=("stdio", "tcp"), default="stdio", help="protocol transport: stdio JSONL or debug TCP JSONL")
+    parser.add_argument("--ipc", choices=("stdio", "tcp"), default="stdio", help="protocol transport: stdio binary packets or debug TCP JSONL")
     parser.add_argument("--tcp-host", default="127.0.0.1", help="debug TCP listen host")
     parser.add_argument("--tcp-port", type=int, default=29536, help="debug TCP listen port")
     parser.add_argument("--log-level", default="INFO", help="reserved for future structured logging")
     return parser
 
 
-def open_stdio_endpoint() -> Tuple[TextIO, JsonLineWriter]:
-    return sys.stdin, JsonLineWriter(sys.stdout, owns_stream=False)
+def open_stdio_endpoint() -> Tuple[BinaryPacketReader, BinaryPacketWriter]:
+    return BinaryPacketReader(sys.stdin.buffer), BinaryPacketWriter(sys.stdout.buffer, owns_stream=False)
 
 
 def open_tcp_endpoint(host: str, port: int) -> Tuple[TextIO, JsonLineWriter]:
@@ -371,35 +367,44 @@ def open_tcp_endpoint(host: str, port: int) -> Tuple[TextIO, JsonLineWriter]:
     return reader, writer
 
 
-def serve(reader: TextIO, writer: JsonLineWriter, ipc_mode: str) -> int:
+def serve(reader: Any, writer: Any, ipc_mode: str) -> int:
     server = BridgeServer(ipc_mode=ipc_mode, writer=writer)
 
     try:
         while server.running:
             try:
-                raw_line = reader.readline()
+                if ipc_mode == "stdio":
+                    packet = reader.read()
+                    if packet is None:
+                        if server.running and server._session is not None:
+                            server.close_session(reason="peer_eof", notify_peer=False)
+                        break
+                    payload, packet_data = packet
+                else:
+                    raw_line = reader.readline()
+                    if raw_line == "":
+                        if server.running and server._session is not None:
+                            server.close_session(reason="peer_eof", notify_peer=False)
+                        break
+                    line = raw_line.strip()
+                    if line == "":
+                        continue
+                    payload = json.loads(line)
+                    packet_data = b""
+            except json.JSONDecodeError as exc:
+                server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol")
+                continue
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 if server.running and server._session is not None:  # intentional private access for peer-reset cleanup
                     log_stderr(f"peer disconnected while reading command stream: {exc}")
                     server.close_session(reason="peer_disconnect", notify_peer=False)
                 break
-            if raw_line == "":
-                if server.running and server._session is not None:  # intentional private access for EOF cleanup
-                    server.close_session(reason="peer_eof", notify_peer=False)
-                break
-
-            line = raw_line.strip()
-            if line == "":
-                continue
-
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError as exc:
+            except ProtocolError as exc:
                 server.emit_error(code="INVALID_MESSAGE", detail=str(exc), scope="protocol")
                 continue
 
             try:
-                keep_running = server.handle_message(payload)
+                keep_running = server.handle_message(payload, packet_data)
             except (ProtocolError, BridgeConfigError) as exc:
                 reply_to = payload.get("seq") if isinstance(payload, dict) else None
                 if not isinstance(reply_to, int):

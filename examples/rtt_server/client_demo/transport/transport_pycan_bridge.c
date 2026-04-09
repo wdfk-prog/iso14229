@@ -4,8 +4,8 @@
  *
  * Design notes:
  * - Reuses iso14229's `UDSISOTpC_t`; this backend owns only raw CAN frame I/O.
- * - Python sidecar transport is local IPC carrying JSON Lines over child stdio
- *   (primary) or loopback TCP (debug-only reserve path).
+ * - Python sidecar transport uses length-prefixed packets over child stdio
+ *   (primary hot path) or loopback TCP JSONL (debug-only reserve path).
  * - Incoming raw CAN frames are queued first, then drained from `poll()` and
  *   forwarded to `isotp_on_can_message(...)` before the original ISO-TP poll.
  */
@@ -32,14 +32,19 @@
 #define ARRAYSIZE(a) (sizeof(a) / sizeof((a)[0]))
 #endif
 
-#define UDS_PYCAN_PROTOCOL_VERSION      "pycan-bridge/1"
+#define UDS_PYCAN_PROTOCOL_VERSION      "pycan-bridge/2"
 #define UDS_PYCAN_CLIENT_NAME           "client_demo"
 #define UDS_PYCAN_DEFAULT_TIMEOUT_MS    250U
 #define UDS_PYCAN_CLOSE_GRACE_MS        300U
 #define UDS_PYCAN_IO_POLL_GRANULARITY   10U
 #define UDS_PYCAN_CMD_BUF_SIZE          1024U
 #define UDS_PYCAN_LINE_BUF_SIZE         4096U
-#define UDS_PYCAN_READ_BUF_SIZE         16384U
+#define UDS_PYCAN_META_BUF_SIZE         2048U
+#define UDS_PYCAN_CTRL_QUEUE_CAP        128U
+#define UDS_PYCAN_PACKET_MAGIC_0        'P'
+#define UDS_PYCAN_PACKET_MAGIC_1        'Y'
+#define UDS_PYCAN_PACKET_MAGIC_2        'C'
+#define UDS_PYCAN_PACKET_MAGIC_3        'N'
 #define UDS_PYCAN_SCOPE_BUF_SIZE        32U
 #define UDS_PYCAN_CODE_BUF_SIZE         64U
 #define UDS_PYCAN_DETAIL_BUF_SIZE       256U
@@ -59,12 +64,33 @@ typedef struct {
 } uds_pycan_rx_frame_t;
 
 typedef struct {
+    char meta[UDS_PYCAN_META_BUF_SIZE];
+} uds_pycan_ctrl_msg_t;
+
+typedef struct {
+    uint8_t magic[4];
+    uint32_t meta_len;
+    uint32_t data_len;
+} uds_pycan_stdio_packet_hdr_t;
+
+typedef struct {
     UDSISOTpC_t isotp;
     UDSTpStatus_t (*original_poll)(struct UDSTp *hdl);
     uds_transport_t *owner;
 
     CRITICAL_SECTION queue_lock;
     bool queue_lock_initialized;
+    CRITICAL_SECTION ctrl_lock;
+    bool ctrl_lock_initialized;
+    HANDLE ctrl_event;
+    HANDLE reader_thread;
+    bool reader_thread_started;
+    bool reader_stopped;
+    uds_pycan_ctrl_msg_t *ctrl_queue;
+    uint32_t ctrl_queue_capacity;
+    uint32_t ctrl_head;
+    uint32_t ctrl_tail;
+    uint32_t ctrl_count;
     uds_pycan_rx_frame_t *rx_queue;
     uint32_t rx_queue_capacity;
     uint32_t rx_head;
@@ -110,7 +136,7 @@ typedef struct {
     bool bridge_closed;
     bool peer_disconnected;
 
-    char read_buf[UDS_PYCAN_READ_BUF_SIZE];
+    char read_buf[UDS_PYCAN_LINE_BUF_SIZE];
     size_t read_len;
     bool drop_until_newline;
 
@@ -127,6 +153,20 @@ _Static_assert(sizeof(uds_transport_pycan_ctx_t) <= UDS_TRANSPORT_STORAGE_CAPACI
                "UDS_TRANSPORT_STORAGE_CAPACITY is too small for pycan backend context");
 
 static UDSTpStatus_t pycan_intercepted_poll(struct UDSTp *hdl);
+static int pycan_handle_rx_packet_data(uds_transport_pycan_ctx_t *ctx,
+                                       const char *meta,
+                                       const uint8_t *data,
+                                       uint32_t data_len);
+static int pycan_stdio_send_packet(uds_transport_pycan_ctx_t *ctx,
+                                   const char *meta,
+                                   const uint8_t *data,
+                                   uint32_t data_len);
+static int pycan_start_stdio_reader(uds_transport_pycan_ctx_t *ctx);
+static int pycan_next_control_message(uds_transport_pycan_ctx_t *ctx,
+                                      char *out,
+                                      size_t out_size,
+                                      uint32_t wait_ms);
+static int pycan_next_line(uds_transport_pycan_ctx_t *ctx, char *out, size_t out_size, uint32_t wait_ms);
 
 static void pycan_copy_string(char *dst, size_t dst_size, const char *src, const char *fallback);
 static void pycan_canonicalize_existing_path(char *path, size_t path_size);
@@ -528,6 +568,117 @@ static void pycan_queue_reset(uds_transport_pycan_ctx_t *ctx)
     ctx->rx_overflow = false;
     ctx->unsupported_fd_len_seen = false;
     ctx->line_overflow_seen = false;
+    ctx->read_len = 0U;
+    ctx->drop_until_newline = false;
+    ctx->read_buf[0] = '\0';
+}
+
+static void pycan_ctrl_queue_reset(uds_transport_pycan_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->ctrl_queue == NULL || ctx->ctrl_queue_capacity == 0U) {
+        return;
+    }
+
+    memset(ctx->ctrl_queue, 0, sizeof(ctx->ctrl_queue[0]) * ctx->ctrl_queue_capacity);
+    ctx->ctrl_head = 0U;
+    ctx->ctrl_tail = 0U;
+    ctx->ctrl_count = 0U;
+    ctx->reader_stopped = false;
+    if (ctx->ctrl_event != NULL) {
+        ResetEvent(ctx->ctrl_event);
+    }
+}
+
+static int pycan_ctrl_queue_push(uds_transport_pycan_ctx_t *ctx, const char *meta)
+{
+    uds_pycan_ctrl_msg_t *slot;
+
+    if (ctx == NULL || meta == NULL || ctx->ctrl_queue == NULL || ctx->ctrl_queue_capacity == 0U) {
+        return -1;
+    }
+
+    if (ctx->ctrl_lock_initialized) {
+        EnterCriticalSection(&ctx->ctrl_lock);
+    }
+
+    if (ctx->ctrl_count >= ctx->ctrl_queue_capacity) {
+        ctx->line_overflow_seen = true;
+        if (ctx->ctrl_event != NULL) {
+            SetEvent(ctx->ctrl_event);
+        }
+        if (ctx->ctrl_lock_initialized) {
+            LeaveCriticalSection(&ctx->ctrl_lock);
+        }
+        return -1;
+    }
+
+    slot = &ctx->ctrl_queue[ctx->ctrl_tail];
+    memset(slot, 0, sizeof(*slot));
+    pycan_copy_string(slot->meta, sizeof(slot->meta), meta, "");
+    ctx->ctrl_tail = (ctx->ctrl_tail + 1U) % ctx->ctrl_queue_capacity;
+    ctx->ctrl_count++;
+    if (ctx->ctrl_event != NULL) {
+        SetEvent(ctx->ctrl_event);
+    }
+
+    if (ctx->ctrl_lock_initialized) {
+        LeaveCriticalSection(&ctx->ctrl_lock);
+    }
+
+    return 0;
+}
+
+static int pycan_ctrl_queue_pop(uds_transport_pycan_ctx_t *ctx, char *out, size_t out_size, uint32_t wait_ms)
+{
+    DWORD wait_rc;
+
+    if (ctx == NULL || out == NULL || out_size == 0U) {
+        return -1;
+    }
+
+    for (;;) {
+        if (ctx->ctrl_lock_initialized) {
+            EnterCriticalSection(&ctx->ctrl_lock);
+        }
+
+        if (ctx->ctrl_count > 0U) {
+            uds_pycan_ctrl_msg_t *slot = &ctx->ctrl_queue[ctx->ctrl_head];
+            pycan_copy_string(out, out_size, slot->meta, "");
+            memset(slot, 0, sizeof(*slot));
+            ctx->ctrl_head = (ctx->ctrl_head + 1U) % ctx->ctrl_queue_capacity;
+            ctx->ctrl_count--;
+            if (ctx->ctrl_count == 0U && !ctx->reader_stopped && ctx->ctrl_event != NULL) {
+                ResetEvent(ctx->ctrl_event);
+            }
+            if (ctx->ctrl_lock_initialized) {
+                LeaveCriticalSection(&ctx->ctrl_lock);
+            }
+            return 1;
+        }
+
+        if (ctx->reader_stopped) {
+            if (ctx->ctrl_lock_initialized) {
+                LeaveCriticalSection(&ctx->ctrl_lock);
+            }
+            return -1;
+        }
+
+        if (ctx->ctrl_lock_initialized) {
+            LeaveCriticalSection(&ctx->ctrl_lock);
+        }
+
+        if (wait_ms == 0U || ctx->ctrl_event == NULL) {
+            return 0;
+        }
+
+        wait_rc = WaitForSingleObject(ctx->ctrl_event, wait_ms);
+        if (wait_rc == WAIT_TIMEOUT) {
+            return 0;
+        }
+        if (wait_rc != WAIT_OBJECT_0) {
+            return -1;
+        }
+    }
 }
 
 static int pycan_queue_push(uds_transport_pycan_ctx_t *ctx,
@@ -659,6 +810,10 @@ static void pycan_close_child_handles(uds_transport_pycan_ctx_t *ctx)
         CloseHandle(ctx->child_stdout_read);
         ctx->child_stdout_read = NULL;
     }
+    if (ctx->reader_thread != NULL) {
+        CloseHandle(ctx->reader_thread);
+        ctx->reader_thread = NULL;
+    }
     if (ctx->child_thread != NULL) {
         CloseHandle(ctx->child_thread);
         ctx->child_thread = NULL;
@@ -667,6 +822,7 @@ static void pycan_close_child_handles(uds_transport_pycan_ctx_t *ctx)
         CloseHandle(ctx->child_process);
         ctx->child_process = NULL;
     }
+    ctx->reader_thread_started = false;
     ctx->child_pid = 0U;
 }
 
@@ -688,10 +844,8 @@ static void pycan_shutdown_ctx(uds_transport_pycan_ctx_t *ctx)
         snprintf(line, sizeof(line),
                  "{\"type\":\"close\",\"seq\":%lu,\"reason\":\"client_shutdown\"}\n",
                  (unsigned long)(++ctx->next_seq));
-        if (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL && ctx->child_stdin_write != NULL) {
-            DWORD ignored = 0U;
-            (void)WriteFile(ctx->child_stdin_write, line, (DWORD)strlen(line), &ignored, NULL);
-            FlushFileBuffers(ctx->child_stdin_write);
+        if (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL) {
+            (void)pycan_stdio_send_packet(ctx, line, NULL, 0U);
         } else if (ctx->sock != INVALID_SOCKET) {
             (void)send(ctx->sock, line, (int)strlen(line), 0);
             shutdown(ctx->sock, SD_BOTH);
@@ -709,6 +863,10 @@ static void pycan_shutdown_ctx(uds_transport_pycan_ctx_t *ctx)
         WaitForSingleObject(ctx->child_process, UDS_PYCAN_CLOSE_GRACE_MS);
     }
 
+    if (ctx->reader_thread != NULL) {
+        (void)WaitForSingleObject(ctx->reader_thread, UDS_PYCAN_CLOSE_GRACE_MS);
+    }
+
     pycan_close_socket(ctx);
     pycan_close_child_handles(ctx);
 
@@ -717,9 +875,21 @@ static void pycan_shutdown_ctx(uds_transport_pycan_ctx_t *ctx)
         ctx->winsock_started = false;
     }
 
+    if (ctx->ctrl_event != NULL) {
+        CloseHandle(ctx->ctrl_event);
+        ctx->ctrl_event = NULL;
+    }
+    if (ctx->ctrl_lock_initialized) {
+        DeleteCriticalSection(&ctx->ctrl_lock);
+        ctx->ctrl_lock_initialized = false;
+    }
     if (ctx->queue_lock_initialized) {
         DeleteCriticalSection(&ctx->queue_lock);
         ctx->queue_lock_initialized = false;
+    }
+    if (ctx->ctrl_queue != NULL) {
+        free(ctx->ctrl_queue);
+        ctx->ctrl_queue = NULL;
     }
 
     ctx->owner = NULL;
@@ -1024,6 +1194,223 @@ static int pycan_try_extract_line(uds_transport_pycan_ctx_t *ctx, char *out, siz
     return 1;
 }
 
+static int pycan_handle_rx_packet_data(uds_transport_pycan_ctx_t *ctx,
+                                       const char *meta,
+                                       const uint8_t *data,
+                                       uint32_t data_len)
+{
+    uint32_t can_id;
+    bool is_fd = false;
+
+    if (ctx == NULL || meta == NULL || data == NULL || data_len == 0U || data_len > UDS_PYCAN_MAX_FRAME_DATA) {
+        return -1;
+    }
+
+    if (pycan_json_get_u32(meta, "can_id", &can_id) != 0) {
+        return -1;
+    }
+    if (pycan_json_get_bool(meta, "fd", &is_fd) != 0) {
+        is_fd = false;
+    }
+
+    return pycan_queue_push(ctx,
+                            pycan_mask_can_id(can_id, ctx->use_extended_ids),
+                            data,
+                            (uint8_t)data_len,
+                            is_fd);
+}
+
+static int pycan_stdio_send_packet(uds_transport_pycan_ctx_t *ctx,
+                                   const char *meta,
+                                   const uint8_t *data,
+                                   uint32_t data_len)
+{
+    uds_pycan_stdio_packet_hdr_t hdr;
+    const uint8_t *p = NULL;
+    size_t remain = 0U;
+
+    if (ctx == NULL || meta == NULL || ctx->child_stdin_write == NULL) {
+        return -1;
+    }
+    if (data_len > UDS_PYCAN_MAX_FRAME_DATA) {
+        return -1;
+    }
+
+    hdr.magic[0] = UDS_PYCAN_PACKET_MAGIC_0;
+    hdr.magic[1] = UDS_PYCAN_PACKET_MAGIC_1;
+    hdr.magic[2] = UDS_PYCAN_PACKET_MAGIC_2;
+    hdr.magic[3] = UDS_PYCAN_PACKET_MAGIC_3;
+    hdr.meta_len = (uint32_t)strlen(meta);
+    hdr.data_len = data_len;
+
+    p = (const uint8_t *)&hdr;
+    remain = sizeof(hdr);
+    while (remain > 0U) {
+        DWORD written = 0U;
+        DWORD chunk = (remain > 4096U) ? 4096U : (DWORD)remain;
+        if (!WriteFile(ctx->child_stdin_write, p, chunk, &written, NULL) || written == 0U) {
+            return -1;
+        }
+        p += written;
+        remain -= written;
+    }
+
+    p = (const uint8_t *)meta;
+    remain = hdr.meta_len;
+    while (remain > 0U) {
+        DWORD written = 0U;
+        DWORD chunk = (remain > 4096U) ? 4096U : (DWORD)remain;
+        if (!WriteFile(ctx->child_stdin_write, p, chunk, &written, NULL) || written == 0U) {
+            return -1;
+        }
+        p += written;
+        remain -= written;
+    }
+
+    p = data;
+    remain = data_len;
+    while (remain > 0U) {
+        DWORD written = 0U;
+        DWORD chunk = (remain > 4096U) ? 4096U : (DWORD)remain;
+        if (!WriteFile(ctx->child_stdin_write, p, chunk, &written, NULL) || written == 0U) {
+            return -1;
+        }
+        p += written;
+        remain -= written;
+    }
+
+    return 0;
+}
+
+static int pycan_pipe_read_exact(HANDLE pipe, void *buf, DWORD len)
+{
+    uint8_t *dst = (uint8_t *)buf;
+    DWORD total = 0U;
+
+    if (pipe == NULL || buf == NULL) {
+        return -1;
+    }
+
+    while (total < len) {
+        DWORD got = 0U;
+        if (!ReadFile(pipe, dst + total, len - total, &got, NULL) || got == 0U) {
+            return -1;
+        }
+        total += got;
+    }
+
+    return 0;
+}
+
+static DWORD WINAPI pycan_stdio_reader_main(LPVOID param)
+{
+    uds_transport_pycan_ctx_t *ctx = (uds_transport_pycan_ctx_t *)param;
+
+    if (ctx == NULL || ctx->child_stdout_read == NULL) {
+        return 1U;
+    }
+
+    for (;;) {
+        uds_pycan_stdio_packet_hdr_t hdr;
+        char meta[UDS_PYCAN_META_BUF_SIZE];
+        uint8_t data[UDS_PYCAN_MAX_FRAME_DATA];
+        char type[32];
+
+        if (pycan_pipe_read_exact(ctx->child_stdout_read, &hdr, (DWORD)sizeof(hdr)) != 0) {
+            break;
+        }
+        if (hdr.magic[0] != UDS_PYCAN_PACKET_MAGIC_0 ||
+            hdr.magic[1] != UDS_PYCAN_PACKET_MAGIC_1 ||
+            hdr.magic[2] != UDS_PYCAN_PACKET_MAGIC_2 ||
+            hdr.magic[3] != UDS_PYCAN_PACKET_MAGIC_3 ||
+            hdr.meta_len == 0U || hdr.meta_len >= sizeof(meta) ||
+            hdr.data_len > UDS_PYCAN_MAX_FRAME_DATA) {
+            pycan_set_last_protocol_error(ctx, "protocol", "INVALID_MESSAGE", "invalid stdio packet header");
+            break;
+        }
+        if (pycan_pipe_read_exact(ctx->child_stdout_read, meta, hdr.meta_len) != 0) {
+            break;
+        }
+        meta[hdr.meta_len] = '\0';
+        if (hdr.data_len > 0U && pycan_pipe_read_exact(ctx->child_stdout_read, data, hdr.data_len) != 0) {
+            break;
+        }
+
+        if (pycan_json_get_string(meta, "type", type, sizeof(type)) != 0) {
+            pycan_set_last_protocol_error(ctx, "protocol", "INVALID_MESSAGE", "missing or invalid packet type");
+            break;
+        }
+
+        if (strcmp(type, "rx") == 0) {
+            if (hdr.data_len == 0U || pycan_handle_rx_packet_data(ctx, meta, data, hdr.data_len) != 0) {
+                pycan_set_last_protocol_error(ctx, "recv", "INVALID_MESSAGE", "invalid rx packet");
+                break;
+            }
+            continue;
+        }
+
+        if (pycan_ctrl_queue_push(ctx, meta) != 0) {
+            pycan_set_last_protocol_error(ctx, "protocol", "QUEUE_OVERFLOW", "control queue is full");
+            break;
+        }
+    }
+
+    if (ctx->ctrl_lock_initialized) {
+        EnterCriticalSection(&ctx->ctrl_lock);
+        ctx->reader_stopped = true;
+        if (ctx->ctrl_event != NULL) {
+            SetEvent(ctx->ctrl_event);
+        }
+        LeaveCriticalSection(&ctx->ctrl_lock);
+    } else if (ctx->ctrl_event != NULL) {
+        SetEvent(ctx->ctrl_event);
+    }
+
+    return 0U;
+}
+
+static int pycan_start_stdio_reader(uds_transport_pycan_ctx_t *ctx)
+{
+    DWORD thread_id = 0U;
+
+    if (ctx == NULL || ctx->child_stdout_read == NULL) {
+        return -1;
+    }
+    if (ctx->reader_thread_started) {
+        return 0;
+    }
+
+    ctx->reader_thread = CreateThread(NULL, 0U, pycan_stdio_reader_main, ctx, 0U, &thread_id);
+    if (ctx->reader_thread == NULL) {
+        return -1;
+    }
+    ctx->reader_thread_started = true;
+    return 0;
+}
+
+static int pycan_next_control_message(uds_transport_pycan_ctx_t *ctx,
+                                      char *out,
+                                      size_t out_size,
+                                      uint32_t wait_ms)
+{
+    if (ctx == NULL || out == NULL || out_size == 0U) {
+        return -1;
+    }
+
+    if (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL) {
+        int rc = pycan_ctrl_queue_pop(ctx, out, out_size, wait_ms);
+        if (rc < 0) {
+            ctx->peer_disconnected = true;
+            if (ctx->last_code[0] == '\0') {
+                pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
+            }
+        }
+        return rc;
+    }
+
+    return pycan_next_line(ctx, out, out_size, wait_ms);
+}
+
 static int pycan_pipe_read_some(uds_transport_pycan_ctx_t *ctx, uint32_t wait_ms)
 {
     uint32_t deadline = pycan_now_ms() + wait_ms;
@@ -1179,24 +1566,7 @@ static int pycan_send_line(uds_transport_pycan_ctx_t *ctx, const char *line)
     }
 
     if (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL) {
-        const char *p = line;
-        size_t remain = strlen(line);
-
-        if (ctx->child_stdin_write == NULL) {
-            return -1;
-        }
-
-        while (remain > 0U) {
-            DWORD written = 0U;
-            DWORD chunk = (remain > 4096U) ? 4096U : (DWORD)remain;
-            if (!WriteFile(ctx->child_stdin_write, p, chunk, &written, NULL) || written == 0U) {
-                return -1;
-            }
-            remain -= written;
-            p += written;
-        }
-        FlushFileBuffers(ctx->child_stdin_write);
-        return 0;
+        return pycan_stdio_send_packet(ctx, line, NULL, 0U);
     }
 
     if (ctx->sock == INVALID_SOCKET) {
@@ -1338,14 +1708,15 @@ static int pycan_wait_for_reply(uds_transport_pycan_ctx_t *ctx,
     }
 
     while (pycan_now_ms() <= deadline) {
+        uint32_t now = pycan_now_ms();
+        uint32_t remain = (deadline > now) ? (deadline - now) : 0U;
         bool matched = false;
-        int rc = pycan_next_line(ctx,
-                                 line,
-                                 sizeof(line),
-                                 (timeout_ms == 0U) ? 0U : UDS_PYCAN_IO_POLL_GRANULARITY);
+        int rc = pycan_next_control_message(ctx, line, sizeof(line), remain);
         if (rc < 0) {
             ctx->peer_disconnected = true;
-            pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
+            if (ctx->last_code[0] == '\0') {
+                pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
+            }
             return -1;
         }
         if (rc == 0) {
@@ -1365,58 +1736,6 @@ static int pycan_wait_for_reply(uds_transport_pycan_ctx_t *ctx,
     return -1;
 }
 
-
-static int pycan_wait_for_tx_result(uds_transport_pycan_ctx_t *ctx,
-                                    uint32_t reply_to,
-                                    uint32_t timeout_ms)
-{
-    uint32_t deadline = pycan_now_ms() + timeout_ms;
-    char line[UDS_PYCAN_LINE_BUF_SIZE];
-
-    if (ctx == NULL) {
-        return -1;
-    }
-
-    while (pycan_now_ms() <= deadline) {
-        char type[32];
-        uint32_t event_reply_to = 0U;
-        bool has_reply_to;
-        bool ignored_match = false;
-        int rc = pycan_next_line(ctx,
-                                 line,
-                                 sizeof(line),
-                                 (timeout_ms == 0U) ? 0U : UDS_PYCAN_IO_POLL_GRANULARITY);
-        if (rc < 0) {
-            ctx->peer_disconnected = true;
-            pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
-            return -1;
-        }
-        if (rc == 0) {
-            continue;
-        }
-
-        if (pycan_json_get_string(line, "type", type, sizeof(type)) == 0) {
-            has_reply_to = (pycan_json_get_u32(line, "reply_to", &event_reply_to) == 0);
-            if (has_reply_to && event_reply_to == reply_to) {
-                if (strcmp(type, "tx_done") == 0) {
-                    return 0;
-                }
-                if (strcmp(type, "error") == 0) {
-                    if (pycan_process_line(ctx, line, reply_to, "tx_done", &ignored_match) != 0) {
-                        return -1;
-                    }
-                }
-            }
-        }
-
-        if (pycan_process_line(ctx, line, 0U, NULL, &ignored_match) != 0) {
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
 static int pycan_pump_io(uds_transport_pycan_ctx_t *ctx)
 {
     char line[UDS_PYCAN_LINE_BUF_SIZE];
@@ -1427,10 +1746,12 @@ static int pycan_pump_io(uds_transport_pycan_ctx_t *ctx)
 
     for (;;) {
         bool ignored_match = false;
-        int rc = pycan_next_line(ctx, line, sizeof(line), 0U);
+        int rc = pycan_next_control_message(ctx, line, sizeof(line), 0U);
         if (rc < 0) {
             ctx->peer_disconnected = true;
-            pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
+            if (ctx->last_code[0] == '\0') {
+                pycan_set_last_protocol_error(ctx, "io", "BUS_DISCONNECTED", "bridge EOF or IPC failure");
+            }
             return -1;
         }
         if (rc == 0) {
@@ -1763,8 +2084,17 @@ static int pycan_send_tx_frame(uds_transport_pycan_ctx_t *ctx,
         return -1;
     }
 
-    pycan_encode_hex(data, size, hex, sizeof(hex));
     seq = ++ctx->next_seq;
+    if (ctx->ipc_mode == UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL) {
+        snprintf(line, sizeof(line),
+                 "{\"type\":\"tx\",\"seq\":%lu,\"can_id\":%lu,\"extended\":%s}",
+                 (unsigned long)seq,
+                 (unsigned long)pycan_mask_can_id(arbitration_id, ctx->use_extended_ids),
+                 ctx->use_extended_ids ? "true" : "false");
+        return pycan_stdio_send_packet(ctx, line, data, size);
+    }
+
+    pycan_encode_hex(data, size, hex, sizeof(hex));
     snprintf(line, sizeof(line),
              "{\"type\":\"tx\",\"seq\":%lu,\"can_id\":%lu,\"extended\":%s,\"fd\":%s,\"brs\":%s,\"rtr\":false,\"data\":\"%s\"}\n",
              (unsigned long)seq,
@@ -1773,13 +2103,7 @@ static int pycan_send_tx_frame(uds_transport_pycan_ctx_t *ctx,
              ctx->use_canfd ? "true" : "false",
              ctx->use_brs ? "true" : "false",
              hex);
-    if (pycan_send_line(ctx, line) != 0) {
-        return -1;
-    }
-
-    return pycan_wait_for_tx_result(ctx,
-                                    seq,
-                                    (ctx->io_timeout_ms > 0U) ? ctx->io_timeout_ms : UDS_PYCAN_DEFAULT_TIMEOUT_MS);
+    return pycan_send_line(ctx, line);
 }
 
 static int pycan_apply_runtime_cfg(uds_transport_pycan_ctx_t *ctx,
@@ -1864,10 +2188,24 @@ static int pycan_open(uds_transport_t *tp, const uds_transport_open_cfg_t *cfg)
     }
     ctx->rx_queue = (uds_pycan_rx_frame_t *)((uint8_t *)tp->bound_storage + queue_offset);
     ctx->rx_queue_capacity = (uint32_t)queue_slots;
+    ctx->ctrl_queue_capacity = UDS_PYCAN_CTRL_QUEUE_CAP;
+    ctx->ctrl_queue = (uds_pycan_ctrl_msg_t *)calloc(ctx->ctrl_queue_capacity, sizeof(uds_pycan_ctrl_msg_t));
+    if (ctx->ctrl_queue == NULL) {
+        pycan_shutdown_ctx(ctx);
+        return pycan_record_error(tp, ctx, UDS_ERR_BUFSIZ);
+    }
 
     InitializeCriticalSection(&ctx->queue_lock);
     ctx->queue_lock_initialized = true;
+    InitializeCriticalSection(&ctx->ctrl_lock);
+    ctx->ctrl_lock_initialized = true;
+    ctx->ctrl_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (ctx->ctrl_event == NULL) {
+        pycan_shutdown_ctx(ctx);
+        return pycan_record_error(tp, ctx, UDS_ERR_TPORT);
+    }
     pycan_queue_reset(ctx);
+    pycan_ctrl_queue_reset(ctx);
 
     if (ctx->auto_spawn) {
         if (pycan_spawn_bridge(ctx) != 0) {
@@ -1883,6 +2221,10 @@ static int pycan_open(uds_transport_t *tp, const uds_transport_open_cfg_t *cfg)
         }
     } else {
         if (ctx->child_stdin_write == NULL || ctx->child_stdout_read == NULL) {
+            pycan_shutdown_ctx(ctx);
+            return pycan_record_error(tp, ctx, UDS_ERR_TPORT);
+        }
+        if (pycan_start_stdio_reader(ctx) != 0) {
             pycan_shutdown_ctx(ctx);
             return pycan_record_error(tp, ctx, UDS_ERR_TPORT);
         }

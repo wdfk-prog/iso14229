@@ -10,6 +10,7 @@ from __future__ import annotations
 import binascii
 import json
 import socket
+import struct
 import sys
 import threading
 import time
@@ -17,7 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-PROTOCOL_VERSION = "pycan-bridge/1"
+PROTOCOL_VERSION = "pycan-bridge/2"
+STDIO_PACKET_MAGIC = b"PYCN"
+STDIO_PACKET_HEADER = struct.Struct("<4sII")
+STDIO_PACKET_MAX_META = 2048
+STDIO_PACKET_MAX_DATA = 64
 DEFAULT_PYTHON = "python"
 DEFAULT_BRIDGE_SCRIPT = "client_demo/tools/pycan_bridge.py"
 SUPPORTED_INTERFACES = {"gs_usb", "slcan"}
@@ -54,8 +59,11 @@ class JsonLineWriter:
         self._owns_stream = owns_stream
         self._lock = threading.Lock()
 
-    def write(self, payload: Dict[str, Any]) -> None:
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    def write(self, payload: Dict[str, Any], data: bytes = b"") -> None:
+        wire_payload = dict(payload)
+        if data:
+            wire_payload["data"] = hex_from_bytes(data)
+        line = json.dumps(wire_payload, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self._lock:
             if self._stream is None:
                 raise BrokenPipeError("writer stream is already closed")
@@ -105,6 +113,99 @@ class JsonLineWriter:
             stream.close()
         except Exception:
             pass
+
+
+class BinaryPacketWriter:
+    """Length-prefixed stdio packet writer for the hot local IPC path."""
+
+    def __init__(self, stream, *, owns_stream: bool = False) -> None:
+        self._stream = stream
+        self._owns_stream = owns_stream
+        self._lock = threading.Lock()
+
+    def write(self, payload: Dict[str, Any], data: bytes = b"") -> None:
+        meta = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(meta) > STDIO_PACKET_MAX_META:
+            raise ProtocolError("packet metadata is too large")
+        if len(data) > STDIO_PACKET_MAX_DATA:
+            raise ProtocolError("packet payload is too large")
+        frame = STDIO_PACKET_HEADER.pack(STDIO_PACKET_MAGIC, len(meta), len(data)) + meta + data
+        with self._lock:
+            if self._stream is None:
+                raise BrokenPipeError("writer stream is already closed")
+            self._stream.write(frame)
+
+    def close(self, *, abort: bool = False) -> None:
+        with self._lock:
+            stream = self._stream
+            self._stream = None
+
+        if stream is None or not self._owns_stream:
+            return
+
+        if abort and hasattr(stream, "detach"):
+            try:
+                detached = stream.detach()
+            except Exception:
+                detached = None
+            if detached is not None:
+                try:
+                    detached.close()
+                except Exception:
+                    pass
+            return
+
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+class BinaryPacketReader:
+    """Reads length-prefixed stdio packets from a binary stream."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def _read_exact(self, size: int) -> Optional[bytes]:
+        chunks = bytearray()
+        while len(chunks) < size:
+            chunk = self._stream.read(size - len(chunks))
+            if chunk in (None, b""):
+                if not chunks:
+                    return None
+                raise BrokenPipeError("unexpected EOF while reading packet")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def read(self) -> Optional[tuple[Dict[str, Any], bytes]]:
+        header = self._read_exact(STDIO_PACKET_HEADER.size)
+        if header is None:
+            return None
+        magic, meta_len, data_len = STDIO_PACKET_HEADER.unpack(header)
+        if magic != STDIO_PACKET_MAGIC:
+            raise ProtocolError("invalid stdio packet magic")
+        if meta_len > STDIO_PACKET_MAX_META:
+            raise ProtocolError("stdio packet metadata exceeds limit")
+        if data_len > STDIO_PACKET_MAX_DATA:
+            raise ProtocolError("stdio packet payload exceeds limit")
+        meta = self._read_exact(meta_len)
+        if meta is None:
+            raise BrokenPipeError("unexpected EOF while reading packet metadata")
+        data = self._read_exact(data_len) if data_len else b""
+        if data is None:
+            raise BrokenPipeError("unexpected EOF while reading packet payload")
+        try:
+            payload = json.loads(meta.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ProtocolError(str(exc)) from exc
+        if not isinstance(payload, dict):
+            raise ProtocolError("top-level JSON value must be an object")
+        return payload, data
 
 
 class SequenceCounter:
@@ -305,6 +406,8 @@ def open_can_bus(options: BusOpenOptions):
     else:  # pragma: no cover - normalize_interface_name keeps this unreachable
         raise BridgeConfigError(f"unsupported interface '{interface_name}'")
 
+    if hasattr(can, "ThreadSafeBus"):
+        return can.ThreadSafeBus(**kwargs)
     return can.Bus(**kwargs)
 
 
@@ -353,14 +456,8 @@ def message_to_protocol_dict(msg, *, seq: int) -> Dict[str, Any]:
     return {
         "type": "rx",
         "seq": seq,
-        "ts_us": monotonic_us(),
         "can_id": int(msg.arbitration_id),
-        "extended": bool(getattr(msg, "is_extended_id", False)),
         "fd": bool(getattr(msg, "is_fd", False)),
-        "brs": bool(getattr(msg, "bitrate_switch", False)),
-        "esi": bool(getattr(msg, "error_state_indicator", False)),
-        "rtr": bool(getattr(msg, "is_remote_frame", False)),
-        "data": hex_from_bytes(getattr(msg, "data", b"")),
     }
 
 

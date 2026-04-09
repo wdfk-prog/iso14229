@@ -95,9 +95,9 @@ typedef struct {
 
 /**
  * @brief IPC mode for the Windows pycan_bridge backend.
- * @details Task 1 fixes the primary IPC contract to local child-process stdio
- *          carrying UTF-8 JSON Lines messages. A loopback TCP mode is kept as a
- *          debug-only reserve option for development and packet capture.
+ * @details The primary IPC contract uses local child-process stdio carrying
+ *          length-prefixed metadata+payload packets. A loopback TCP JSONL mode
+ *          is kept as a debug-only reserve option for development and capture.
  */
 typedef enum {
     UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL = 0,
@@ -126,7 +126,7 @@ typedef struct {
     bool use_canfd;                  /**< Enable CAN FD on the Python sidecar when true. */
     bool use_brs;                    /**< Enable bit-rate switching on CAN FD frames. */
     bool use_extended_ids;           /**< Default outgoing identifier mode. */
-    uds_transport_pycan_bridge_ipc_t ipc_mode; /**< IPC mode; stdio JSONL is primary. */
+    uds_transport_pycan_bridge_ipc_t ipc_mode; /**< IPC mode; stdio packet IPC is primary. */
 } uds_transport_pycan_bridge_cfg_t;
 
 /**
