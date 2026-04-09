@@ -62,6 +62,9 @@ static UDSTpStatus_t socketcan_intercepted_poll(struct UDSTp *hdl)
     }
 
     status = ctx->original_poll(hdl);
+    if (ctx->owner != NULL && status != UDS_TP_IDLE) {
+        ctx->owner->last_activity_ms = UDSMillis();
+    }
     if (status & UDS_TP_ERR) {
         if (ctx->owner) {
             ctx->owner->last_error = UDS_ERR_TPORT;
@@ -166,6 +169,7 @@ static int socketcan_send(uds_transport_t *tp,
         return -1;
     }
 
+    tp->last_activity_ms = UDSMillis();
     return 0;
 }
 
@@ -182,7 +186,12 @@ static int socketcan_poll(uds_transport_t *tp)
     status = UDSTpPoll(&ctx->sock.hdl);
     if (status & UDS_TP_ERR) {
         tp->last_error = UDS_ERR_TPORT;
+        tp->last_activity_ms = UDSMillis();
         return -1;
+    }
+
+    if (status != UDS_TP_IDLE) {
+        tp->last_activity_ms = UDSMillis();
     }
 
     return 0;

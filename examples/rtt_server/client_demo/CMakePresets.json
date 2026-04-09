@@ -15,13 +15,12 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "UDS_ENABLE_WINDOWS": "ON",
         "UDS_WIN_BACKEND": "TSMASTER_API",
-        "UDS_WIN_ARCH": "x64",
-        "UDS_BUILD_WINDOWS_SMOKE": "ON"
+        "UDS_WIN_ARCH": "x64"
       }
     },
     {
       "name": "windows-tsmaster-mingw64",
-      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster smoke",
+      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster client",
       "description": "Historical fallback only. Reads UDS_TSMASTER_SDK_DIR from the environment.",
       "inherits": "windows-tsmaster-base",
       "cacheVariables": {
@@ -30,7 +29,7 @@
     },
     {
       "name": "windows-tsmaster-mingw64-inline-sdk",
-      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster smoke (inline SDK path)",
+      "displayName": "Legacy / MSYS2 MINGW64 + TSMaster client (inline SDK path)",
       "description": "Historical fallback only. Edit UDS_TSMASTER_SDK_DIR below if you do not want to export it in the shell.",
       "inherits": "windows-tsmaster-base",
       "cacheVariables": {
@@ -46,44 +45,22 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "UDS_ENABLE_WINDOWS": "ON",
         "UDS_WIN_BACKEND": "PYCAN_BRIDGE",
-        "UDS_WIN_ARCH": "x64",
-        "UDS_BUILD_WINDOWS_SMOKE": "ON"
+        "UDS_WIN_ARCH": "x64"
       }
     },
     {
       "name": "windows-pycan-mingw64",
       "displayName": "Windows / MSYS2 MINGW64 + pycan client",
-      "description": "Recommended preset. Builds the formal client target with the PYCAN_BRIDGE backend; client_smoke stays available for layered verification.",
+      "description": "Recommended preset. Builds the formal client target with the PYCAN_BRIDGE backend.",
       "inherits": "windows-pycan-base"
     }
   ],
   "buildPresets": [
     {
-      "name": "build-client-smoke",
-      "configurePreset": "windows-tsmaster-mingw64",
-      "targets": [
-        "client_smoke"
-      ]
-    },
-    {
-      "name": "build-client-smoke-inline-sdk",
-      "configurePreset": "windows-tsmaster-mingw64-inline-sdk",
-      "targets": [
-        "client_smoke"
-      ]
-    },
-    {
       "name": "build-client-pycan",
       "configurePreset": "windows-pycan-mingw64",
       "targets": [
         "client"
-      ]
-    },
-    {
-      "name": "build-client-smoke-pycan",
-      "configurePreset": "windows-pycan-mingw64",
-      "targets": [
-        "client_smoke"
       ]
     }
   ]

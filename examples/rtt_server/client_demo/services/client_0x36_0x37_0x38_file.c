@@ -21,6 +21,8 @@
 
 #include "../core/client.h"
 #include "../core/cmd_registry.h"
+#include "../core/client_shell.h"
+#include "../core/file_transfer_path.h"
 #include "../core/uds_context.h"
 #include "../utils/utils.h"
 #include <stdio.h>
@@ -40,6 +42,9 @@
 
 /** @brief Maximum block size for file buffer (ISO-TP MTU limit). */
 #define BLOCK_SIZE_BUFFER 4095
+#define UPLOAD_MAX_BLOCK_LENGTH_CAP 512U
+#define TRANSFER_IDLE_TIMEOUT_MS 10000U
+#define TRANSFER_TOTAL_TIMEOUT_MS 0U
 
 /* ==========================================================================
  * Local File System Utilities
@@ -103,21 +108,60 @@ static int handle_lls(int argc, char **argv)
 /**
  * @brief Waits for a transfer-stage response and normalizes timeout / NRC handling.
  */
-static int wait_transfer_stage(UDSClient_t *client, uint32_t timeout_ms, const char *stage)
+static int wait_transfer_stage(UDSClient_t *client,
+                               uint32_t idle_timeout_ms,
+                               uint32_t total_timeout_ms,
+                               const char *stage)
 {
     uint32_t t_start;
+    uint32_t t_last_progress;
+    uint32_t last_activity_ms;
+    uint8_t last_state;
+    uint16_t last_recv_size;
+    uint8_t last_nrc;
     uint8_t nrc;
 
-    if (client == NULL || timeout_ms == 0u) {
+    if (client == NULL || idle_timeout_ms == 0u) {
         return -1;
     }
 
     t_start = sys_tick_get_ms();
+    t_last_progress = t_start;
+    last_activity_ms = uds_get_transport_activity_ms();
+    last_state = client->state;
+    last_recv_size = client->recv_size;
+    last_nrc = uds_get_last_nrc();
+
     while (client->state != 0) {
+        uint32_t now;
+        uint32_t activity_ms;
+        uint8_t current_nrc;
+
         uds_poll();
-        if (sys_tick_get_ms() - t_start > timeout_ms) {
+        now = sys_tick_get_ms();
+        activity_ms = uds_get_transport_activity_ms();
+        current_nrc = uds_get_last_nrc();
+
+        if (client->state != last_state ||
+            client->recv_size != last_recv_size ||
+            current_nrc != last_nrc ||
+            activity_ms != last_activity_ms) {
+            t_last_progress = now;
+            last_state = client->state;
+            last_recv_size = client->recv_size;
+            last_nrc = current_nrc;
+            last_activity_ms = activity_ms;
+        }
+
+        if (total_timeout_ms > 0u && (now - t_start) > total_timeout_ms) {
             printf("\n");
-            LOG_ERROR("%s Timeout after %lu ms", stage, (unsigned long)timeout_ms);
+            LOG_ERROR("%s Overall timeout after %lu ms", stage, (unsigned long)total_timeout_ms);
+            return -1;
+        }
+
+        if ((now - t_last_progress) > idle_timeout_ms) {
+            printf("\n");
+            LOG_ERROR("%s stalled for %lu ms", stage, (unsigned long)idle_timeout_ms);
             return -1;
         }
     }
@@ -147,7 +191,9 @@ static int wait_transfer_stage(UDSClient_t *client, uint32_t timeout_ms, const c
  */
 static int handle_upload(int argc, char **argv) 
 {
-    const char *filename;
+    const char *local_path;
+    const char *remote_name;
+    char remote_path[256];
     FILE *fp;
     long file_pos;
     size_t filesize;
@@ -163,34 +209,46 @@ static int handle_upload(int argc, char **argv)
     uint8_t exit_data[4];
 
     if (argc < 2) return 0;
-    
-    filename = argv[1];
-    fp = fopen(filename, "rb");
-    if (!fp) { 
-        LOG_ERROR("File not found: %s", filename); 
-        return -1; 
+
+    local_path = argv[1];
+    remote_name = file_transfer_path_basename(local_path);
+    if (remote_name == NULL || remote_name[0] == '\0') {
+        LOG_ERROR("Invalid local file path: %s", local_path);
+        return -1;
+    }
+    if (file_transfer_join_remote_path(client_shell_get_path(), remote_name,
+                                       remote_path, sizeof(remote_path)) != 0) {
+        LOG_ERROR("Remote path too long for upload target: %s/%s",
+                  client_shell_get_path(), remote_name);
+        return -1;
+    }
+
+    fp = fopen(local_path, "rb");
+    if (!fp) {
+        LOG_ERROR("File not found: %s", local_path);
+        return -1;
     }
 
     /* Calculate file size */
     if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
-        LOG_ERROR("Failed to seek file: %s", filename);
+        LOG_ERROR("Failed to seek file: %s", local_path);
         return -1;
     }
     file_pos = ftell(fp);
     if (file_pos < 0) {
         fclose(fp);
-        LOG_ERROR("Failed to query file size: %s", filename);
+        LOG_ERROR("Failed to query file size: %s", local_path);
         return -1;
     }
     filesize = (size_t)file_pos;
     (void)fseek(fp, 0, SEEK_SET);
 
-    LOG_INFO("Uploading '%s' (%lu bytes)...", filename, (unsigned long)filesize);
+    LOG_INFO("Uploading '%s' -> '%s' (%lu bytes)...", local_path, remote_path, (unsigned long)filesize);
     client = uds_get_client();
 
     /* 1. Request: 0x38 AddFile */
-    if (UDS_TRANSACTION(UDSSendRequestFileTransfer(client, MOOP_ADD_FILE, filename, 0x00, 4, filesize, filesize), "Initializing") != 0) {
+    if (UDS_TRANSACTION(UDSSendRequestFileTransfer(client, MOOP_ADD_FILE, remote_path, 0x00, 4, filesize, filesize), "Initializing") != 0) {
         fclose(fp); 
         return -1;
     }
@@ -210,6 +268,9 @@ static int handle_upload(int argc, char **argv)
     if (max_chunk > (sizeof(buffer) + 2u)) {
         max_chunk = sizeof(buffer) + 2u;
     }
+    if (max_chunk > UPLOAD_MAX_BLOCK_LENGTH_CAP) {
+        max_chunk = UPLOAD_MAX_BLOCK_LENGTH_CAP;
+    }
     payload_len = max_chunk - 2u; /* Subtract SID (1) + Sequence (1) */
     
     /* 2. Transfer Loop: 0x36 TransferData */
@@ -218,7 +279,7 @@ static int handle_upload(int argc, char **argv)
         if (read_len == 0u) {
             if (ferror(fp)) {
                 printf("\n");
-                LOG_ERROR("Read failed while uploading '%s'", filename);
+                LOG_ERROR("Read failed while uploading '%s'", local_path);
                 fclose(fp);
                 return -1;
             }
@@ -235,7 +296,7 @@ static int handle_upload(int argc, char **argv)
             return -1;
         }
 
-        if (wait_transfer_stage(client, 2000u, "Upload block") != 0) {
+        if (wait_transfer_stage(client, TRANSFER_IDLE_TIMEOUT_MS, TRANSFER_TOTAL_TIMEOUT_MS, "Upload block") != 0) {
             fclose(fp);
             return -1;
         }
@@ -275,7 +336,9 @@ static int handle_upload(int argc, char **argv)
  */
 static int handle_download(int argc, char **argv) 
 {
-    const char *filename;
+    const char *remote_arg;
+    const char *local_name;
+    char remote_path[256];
     FILE *fp;
     UDSClient_t *client;
     struct RequestFileTransferResponse resp = {0};
@@ -288,18 +351,31 @@ static int handle_download(int argc, char **argv)
     int rc = -1;
 
     if (argc < 2) return 0;
-    
-    filename = argv[1];
-    fp = fopen(filename, "wb");
-    if (!fp) { 
-        LOG_ERROR("Cannot write %s", filename); 
-        return -1; 
+
+    remote_arg = argv[1];
+    local_name = file_transfer_path_basename(remote_arg);
+    if (local_name == NULL || local_name[0] == '\0') {
+        LOG_ERROR("Invalid remote file path: %s", remote_arg);
+        return -1;
+    }
+    if (file_transfer_join_remote_path(client_shell_get_path(), remote_arg,
+                                       remote_path, sizeof(remote_path)) != 0) {
+        LOG_ERROR("Remote path too long for download source: %s/%s",
+                  client_shell_get_path(), remote_arg);
+        return -1;
+    }
+
+    fp = fopen(local_name, "wb");
+    if (!fp) {
+        LOG_ERROR("Cannot write %s", local_name);
+        return -1;
     }
 
     client = uds_get_client();
 
     /* 1. Request: 0x38 ReadFile */
-    if (UDS_TRANSACTION(UDSSendRequestFileTransfer(client, MOOP_READ_FILE, filename, 0x00, 0, 0, 0), "Initializing") != 0) {
+    LOG_INFO("Downloading '%s' -> '%s'...", remote_path, local_name);
+    if (UDS_TRANSACTION(UDSSendRequestFileTransfer(client, MOOP_READ_FILE, remote_path, 0x00, 0, 0, 0), "Initializing") != 0) {
         goto cleanup;
     }
 
@@ -318,7 +394,7 @@ static int handle_download(int argc, char **argv)
             goto cleanup;
         }
 
-        if (wait_transfer_stage(client, 3000u, "Download block") != 0) {
+        if (wait_transfer_stage(client, TRANSFER_IDLE_TIMEOUT_MS, TRANSFER_TOTAL_TIMEOUT_MS, "Download block") != 0) {
             goto cleanup;
         }
         if (client->recv_size < 2u || client->recv_buf[0] != 0x76u || client->recv_buf[1] != seq) {
@@ -331,7 +407,7 @@ static int handle_download(int argc, char **argv)
         
         if (data_len > 0u) {
             if (fwrite(&client->recv_buf[2], 1, data_len, fp) != data_len) {
-                LOG_ERROR("Write failed while downloading '%s'", filename);
+                LOG_ERROR("Write failed while downloading '%s'", local_name);
                 goto cleanup;
             }
             crc = crc32_calc(crc, &client->recv_buf[2], data_len);
@@ -360,7 +436,7 @@ static int handle_download(int argc, char **argv)
 cleanup:
     fclose(fp);
     if (rc != 0) {
-        remove(filename);
+        remove(local_name);
     }
     return rc;
 }

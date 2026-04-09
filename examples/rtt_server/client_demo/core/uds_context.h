@@ -67,6 +67,7 @@ UDSClient_t* uds_get_client(void);
  * @return uint8_t 0x00 if the last operation was successful, otherwise the NRC value.
  */
 uint8_t uds_get_last_nrc(void);
+uint32_t uds_get_transport_activity_ms(void);
 
 /* ==========================================================================
  * Public API - Lifecycle Management

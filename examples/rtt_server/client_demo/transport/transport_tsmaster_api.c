@@ -750,6 +750,9 @@ static UDSTpStatus_t tsmaster_intercepted_poll(struct UDSTp *hdl)
 
     tsmaster_feed_rx_queue(ctx);
     status = ctx->original_poll(hdl);
+    if (ctx->owner != NULL && status != UDS_TP_IDLE) {
+        ctx->owner->last_activity_ms = UDSMillis();
+    }
 
     if (ctx->rx_overflow) {
         ctx->rx_overflow = false;
@@ -1079,6 +1082,7 @@ static int tsmaster_send(uds_transport_t *tp,
         return -1;
     }
 
+    tp->last_activity_ms = UDSMillis();
     return 0;
 }
 
@@ -1095,7 +1099,12 @@ static int tsmaster_poll(uds_transport_t *tp)
     status = UDSTpPoll(&ctx->isotp.hdl);
     if (status & UDS_TP_ERR) {
         tp->last_error = UDS_ERR_TPORT;
+        tp->last_activity_ms = UDSMillis();
         return -1;
+    }
+
+    if (status != UDS_TP_IDLE) {
+        tp->last_activity_ms = UDSMillis();
     }
 
     return 0;

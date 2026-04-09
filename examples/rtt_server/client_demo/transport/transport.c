@@ -105,6 +105,7 @@ int uds_transport_open(uds_transport_t *tp, const uds_transport_open_cfg_t *cfg)
         tp->backend_ctx = NULL;
         tp->last_error = 0;
         tp->timeout_ms = 0;
+        tp->last_activity_ms = 0;
         tp->err_cb = NULL;
         tp->err_user = NULL;
         tp->ops = NULL;
@@ -127,6 +128,7 @@ void uds_transport_close(uds_transport_t *tp)
     tp->backend_ctx = NULL;
     tp->last_error = 0;
     tp->timeout_ms = 0;
+    tp->last_activity_ms = 0;
     tp->err_cb = NULL;
     tp->err_user = NULL;
     tp->ops = NULL;
@@ -169,6 +171,15 @@ int uds_transport_get_last_error(uds_transport_t *tp)
     }
 
     return tp->ops->get_last_error(tp);
+}
+
+uint32_t uds_transport_get_last_activity_ms(uds_transport_t *tp)
+{
+    if (tp == NULL) {
+        return 0U;
+    }
+
+    return tp->last_activity_ms;
 }
 
 UDSTp_t *uds_transport_get_tp_handle(uds_transport_t *tp)

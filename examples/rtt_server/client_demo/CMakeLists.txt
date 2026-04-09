@@ -9,7 +9,7 @@ set_property(CACHE UDS_WIN_BACKEND PROPERTY STRINGS TSMASTER_API PYCAN_BRIDGE)
 set(UDS_WIN_ARCH "x64" CACHE STRING "Windows target arch")
 set_property(CACHE UDS_WIN_ARCH PROPERTY STRINGS x64)
 set(UDS_TSMASTER_SDK_DIR "" CACHE PATH "Path to TSMaster SDK root (for example D:/TOSUN/TSMaster/Data/SDK)")
-option(UDS_BUILD_WINDOWS_SMOKE "Build the Windows smoke executable" ON)
+option(UDS_BUILD_WINDOWS_SMOKE "Build the Windows smoke executable" OFF)
 
 set(CLIENT_COMMON_INCLUDE_DIRS
     .
@@ -35,6 +35,9 @@ set(CLIENT_APP_SHARED_SOURCES
     core/cmd_registry.c
     core/response_registry.c
     core/uds_context.c
+    core/file_transfer_path.c
+    core/local_path_completion.c
+    core/shell_command_dispatch.c
 
     services/client_0x10_session.c
     services/client_0x11_reset.c
@@ -304,3 +307,5 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 else()
     message(FATAL_ERROR "Unsupported target system: ${CMAKE_SYSTEM_NAME}")
 endif()
+
+

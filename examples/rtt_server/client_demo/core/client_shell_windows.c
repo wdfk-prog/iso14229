@@ -12,6 +12,8 @@
 #include "client_config.h"
 #include "client.h"
 #include "platform.h"
+#include "shell_command_dispatch.h"
+#include "local_path_completion.h"
 #include "../utils/utils.h"
 
 #include <ctype.h>
@@ -354,9 +356,47 @@ static void shell_collect_command_completions(const char *prefix)
     }
 }
 
+static int shell_emit_local_path_completion(void *ctx, const char *completion)
+{
+    (void)ctx;
+    shell_completion_add(completion);
+    return 0;
+}
+
+static void shell_extract_command_name(const char *line, char *cmd_name, size_t cmd_name_size)
+{
+    const char *space;
+    size_t cmd_len;
+
+    if (cmd_name == NULL || cmd_name_size == 0U) {
+        return;
+    }
+
+    cmd_name[0] = '\0';
+    if (line == NULL) {
+        return;
+    }
+
+    space = strchr(line, ' ');
+    cmd_len = (space != NULL) ? (size_t)(space - line) : strlen(line);
+    if (cmd_len >= cmd_name_size) {
+        cmd_len = cmd_name_size - 1U;
+    }
+
+    memcpy(cmd_name, line, cmd_len);
+    cmd_name[cmd_len] = '\0';
+}
+
+static int shell_is_local_path_command(const char *cmd_name)
+{
+    return (cmd_name != NULL &&
+            (strcmp(cmd_name, "sy") == 0 || strcmp(cmd_name, "lls") == 0));
+}
+
 static void shell_collect_argument_completions(const char *line)
 {
     const char *word_part = strrchr(line, ' ');
+    char cmd_name[64];
     size_t prefix_len;
     size_t word_len;
     int count;
@@ -366,10 +406,21 @@ static void shell_collect_argument_completions(const char *line)
         return;
     }
 
+    shell_extract_command_name(line, cmd_name, sizeof(cmd_name));
+
     word_part += 1;
     prefix_len = (size_t)(word_part - line);
-    word_len = strlen(word_part);
+    if (shell_is_local_path_command(cmd_name)) {
+        local_path_completion_collect(line,
+                                      prefix_len,
+                                      word_part,
+                                      '\\',
+                                      shell_emit_local_path_completion,
+                                      NULL);
+        return;
+    }
 
+    word_len = strlen(word_part);
     count = client_console_get_file_count();
     for (i = 0; i < count; ++i) {
         const char *fname = client_console_get_file_name(i);
@@ -551,32 +602,25 @@ void client_shell_init(void)
 
 static int shell_execute_completed_line(char *line, uint32_t *last_heartbeat_ts, int *exit_code)
 {
+    int exit_requested = 0;
+
     if (line == NULL || last_heartbeat_ts == NULL || exit_code == NULL) {
         return -1;
     }
+
+    (void)shell_trim_whitespace_inplace(line);
 
     if (line[0] != '\0') {
         (void)shell_history_add(line);
         shell_history_save();
 
-        if (strcmp(line, "exit") == 0) {
+        (void)shell_dispatch_command_line(line,
+                                          cmd_execute_line,
+                                          client_send_console_command,
+                                          &exit_requested);
+        if (exit_requested) {
             *exit_code = SHELL_EXIT_USER;
             return 1;
-        }
-
-        if (strcmp(line, "help") == 0) {
-            (void)cmd_execute_line(line);
-        } else {
-            char *line_copy = shell_strdup(line);
-            if (line_copy != NULL) {
-                int res = cmd_execute_line(line_copy);
-                if (res == -1) {
-                    (void)client_send_console_command(line);
-                }
-                free(line_copy);
-            } else {
-                (void)client_send_console_command(line);
-            }
         }
     }
 

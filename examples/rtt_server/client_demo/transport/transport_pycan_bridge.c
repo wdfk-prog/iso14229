@@ -1955,6 +1955,7 @@ static int pycan_send(uds_transport_t *tp,
         tp->last_error = UDS_ERR_TPORT;
         return -1;
     }
+    tp->last_activity_ms = UDSMillis();
     return 0;
 }
 
@@ -1976,6 +1977,9 @@ static UDSTpStatus_t pycan_intercepted_poll(struct UDSTp *hdl)
 
     pycan_feed_rx_queue(ctx);
     status = ctx->original_poll(hdl);
+    if (ctx->owner != NULL && status != UDS_TP_IDLE) {
+        ctx->owner->last_activity_ms = UDSMillis();
+    }
 
     if (ctx->rx_overflow) {
         ctx->rx_overflow = false;
@@ -2015,7 +2019,11 @@ static int pycan_poll(uds_transport_t *tp)
     status = UDSTpPoll(&ctx->isotp.hdl);
     if ((status & UDS_TP_ERR) != 0U || ctx->peer_disconnected) {
         tp->last_error = UDS_ERR_TPORT;
+        tp->last_activity_ms = UDSMillis();
         return -1;
+    }
+    if (status != UDS_TP_IDLE) {
+        tp->last_activity_ms = UDSMillis();
     }
     return 0;
 }

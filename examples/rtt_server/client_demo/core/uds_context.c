@@ -173,6 +173,11 @@ uint8_t uds_get_last_nrc(void)
     return g_last_nrc;
 }
 
+uint32_t uds_get_transport_activity_ms(void)
+{
+    return uds_transport_get_last_activity_ms(&g_transport);
+}
+
 void uds_register_disconnect_callback(uds_disconnect_callback_t cb) 
 {
     g_disconnect_cb = cb;

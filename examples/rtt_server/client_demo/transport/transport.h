@@ -29,7 +29,7 @@ extern "C" {
  * callers can bind a single fixed-size storage block without backend-specific
  * allocation.
  */
-#define UDS_TRANSPORT_STORAGE_CAPACITY (64U * 1024U)
+#define UDS_TRANSPORT_STORAGE_CAPACITY (128U * 1024U)
 
 /**
  * @brief Backend selector for transport implementations.
@@ -163,6 +163,7 @@ struct uds_transport {
     void *backend_ctx;
     int last_error;
     uint32_t timeout_ms;
+    uint32_t last_activity_ms;
     uds_transport_error_callback_t err_cb;
     void *err_user;
 
@@ -206,6 +207,8 @@ int uds_transport_poll(uds_transport_t *tp);
 void uds_transport_set_timeout(uds_transport_t *tp, uint32_t timeout_ms);
 
 int uds_transport_get_last_error(uds_transport_t *tp);
+
+uint32_t uds_transport_get_last_activity_ms(uds_transport_t *tp);
 
 UDSTp_t *uds_transport_get_tp_handle(uds_transport_t *tp);
 

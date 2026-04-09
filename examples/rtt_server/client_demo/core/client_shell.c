@@ -22,6 +22,7 @@
 #include "client_config.h"    /* For CLIENT_HEARTBEAT_MS */
 #include "client.h"           /* For client_console_get_... accessors */
 #include "platform.h"
+#include "shell_command_dispatch.h"
 #include "../utils/linenoise.h"
 #include "../utils/utils.h"
 #include <stdio.h>
@@ -536,38 +537,27 @@ int client_shell_loop(void)
                 /* Complete line received */
                 shell_editor_stop(false); /* Restore terminal. */
                 
+                (void)shell_trim_whitespace_inplace(line);
                 if (strlen(line) > 0) {
+                    int exit_requested = 0;
+
                     linenoiseHistoryAdd(line);
                     linenoiseHistorySave(HISTORY_FILE);
 
-                    /* Command Dispatch */
-                    if (strcmp(line, "exit") == 0) {
+                    /*
+                     * Try local first. Only fall back to remote 0x31 passthrough
+                     * when there is no matching local handler at all.
+                     * This preserves hijacked commands such as sy/ry even when
+                     * the local handler reports an execution failure.
+                     */
+                    (void)shell_dispatch_command_line(line,
+                                                      cmd_execute_line,
+                                                      client_send_console_command,
+                                                      &exit_requested);
+                    if (exit_requested) {
                         free(line);
                         exit_code = SHELL_EXIT_USER;
-                        break; 
-                    } 
-                    else if (strcmp(line, "help") == 0) {
-                        cmd_execute_line(line); /* Local help handler */
-                    }
-                    else {
-                        /* Execute command */
-                        char *line_copy = strdup(line);
-                        if (line_copy) {
-                            /*
-                             * Try local first. Only fall back to remote 0x31 passthrough
-                             * when there is no matching local handler at all.
-                             * This preserves hijacked commands such as sy/ry even when
-                             * the local handler reports an execution failure.
-                             */
-                            int res = cmd_execute_line(line_copy);
-                            if (res == CMD_EXEC_NOT_FOUND) {
-                                client_send_console_command(line); /* Send the original unmodified line */
-                            }
-                            free(line_copy);
-                        } else {
-                            /* If memory allocation fails, still attempt to send the original command */
-                            client_send_console_command(line);
-                        }
+                        break;
                     }
                 }
                 
