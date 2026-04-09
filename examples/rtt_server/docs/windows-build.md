@@ -102,7 +102,25 @@ See [Python / pip Workflow](pycan-pip-workflow.md) for package-level reasoning.
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if slcan --py-channel COM4@9600 --bitrate 1000000
 ```
 
-## 5. `gs_usb` vs `slcan`
+## 5. What CAN hardware is currently supported on Windows
+
+The current repository documentation and CLI validation only document **three Windows hardware paths**:
+
+1. **`gs_usb` class USB CAN adapters** via `PYCAN_BRIDGE`
+   - Examples: candleLight / CANable / canlight-style devices, or other adapters that appear through the `gs_usb` stack
+   - Typical option pair: `--py-if gs_usb --py-channel 0`
+2. **`slcan` / LAWICEL-style serial CAN adapters** via `PYCAN_BRIDGE`
+   - Examples: adapters exposed as a Windows `COM` port and spoken to through an SLCAN-compatible serial protocol
+   - Typical option pair: `--py-if slcan --py-channel COM4@9600`
+3. **TSMaster SDK-bound adapters** via the legacy `TSMASTER_API` smoke path
+   - Only for environments that already have the matching TSMaster SDK layout and libraries
+   - This is **not** the default Windows path
+
+### Important boundary
+
+Although `python-can` supports more interface families in general, **this repository currently validates only `gs_usb` and `slcan` for the default Windows path**. The current CLI rejects other `--py-if` values, so adapters such as PCAN, Vector, Kvaser, ZLG, or Canalyst should **not** be described as supported in this repository unless the code path is extended first.
+
+## 6. `gs_usb` vs `slcan`
 
 | Interface | What it represents | Typical channel example | When to choose |
 | --- | --- | --- | --- |
@@ -115,7 +133,7 @@ Choose `gs_usb` first when the adapter is detected and supported.
 
 Choose `slcan` when the device is presented as a COM port or documented as an SLCAN-compatible serial adapter.
 
-## 6. Why the Windows shell is separate from Linux
+## 7. Why the Windows shell is separate from Linux
 
 The Windows build compiles:
 
@@ -133,7 +151,7 @@ That is deliberate because the Windows console path must manage:
 
 So the project does not reuse the Linux shell blindly. It keeps the command model the same, but uses a Windows-specific console implementation.
 
-## 7. Why Windows is usually slower than Linux
+## 8. Why Windows is usually slower than Linux
 
 In this repository, the Windows client usually carries a longer software path than the Linux path.
 
@@ -143,12 +161,12 @@ Recommended Linux path:
 
 Recommended Windows path:
 
-`client -> transport_pycan_bridge -> stdio JSONL -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
+`client -> transport_pycan_bridge -> stdio packet IPC -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
 
 That means the Windows side commonly adds overhead from:
 
 - **an extra Python sidecar process**
-- **JSON Lines serialization and parsing between C and Python**
+- **packet framing plus metadata serialization/parsing between C and Python**
 - **child-process pipes and stdio flushing**
 - **the user-space `python-can` adapter layer itself**
 - **serial ASCII protocol overhead when `slcan` is used**
@@ -161,7 +179,7 @@ So the accurate statement is: **Windows is not automatically slower as an operat
 - Keep the client and bridge on the same machine.
 - Prefer the Linux host path for high-frequency or latency-sensitive diagnostic work.
 
-## 8. Build the legacy `TSMASTER_API` smoke target
+## 9. Build the legacy `TSMASTER_API` smoke target
 
 Use this only when the matching TSMaster SDK is already available.
 
@@ -180,7 +198,7 @@ cmake --preset windows-tsmaster-mingw64-inline-sdk
 cmake --build --preset build-client-smoke-inline-sdk
 ```
 
-## 9. Common problems
+## 10. Common problems
 
 ### CMake says Windows support is disabled
 

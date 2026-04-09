@@ -173,7 +173,7 @@ static void print_usage(const char *prog_name)
     printf("      --extid                Use extended CAN identifiers\n");
     printf("      --tcp-host <addr>      Debug TCP mode host (default: %s)\n", DEFAULT_PYCAN_HOST);
     printf("      --tcp-port <port>      Debug TCP mode port (default: %u)\n", DEFAULT_PYCAN_PORT);
-    printf("      --ipc-tcp              Use debug TCP transport instead of stdio JSONL\n");
+    printf("      --ipc-tcp              Use debug TCP transport instead of default stdio packet IPC\n");
     printf("      --no-auto-spawn        Do not spawn the Python sidecar from the C client\n");
     printf("\nExamples:\n");
     printf("  %s -b socketcan -i vcan0 -s 7E8 -t 7E0\n", prog_name);

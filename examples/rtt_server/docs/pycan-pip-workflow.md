@@ -145,7 +145,7 @@ This document focuses on `PYCAN_BRIDGE`. Once you choose this path, it means:
 Compared with the native Linux ISO-TP socket path, the default Windows implementation therefore usually adds:
 
 - **process-switch overhead**
-- **JSON Lines text protocol overhead**
+- **packet framing and metadata encode/decode overhead**
 - **pipe buffering and flush latency**
 - **user-space USB / serial adapter overhead**
 

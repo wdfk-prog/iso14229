@@ -143,7 +143,7 @@ flowchart LR
         WSHELL[core/client_shell_windows.c]
         WCTX[core/uds_context.c]
         WTP[transport_pycan_bridge.c]
-        IPC[stdio JSONL IPC]
+        IPC[长度前缀 stdio 包 IPC]
         PYBRIDGE[tools/pycan_bridge.py]
         PYCAN[python-can]
         DEV[gs_usb / slcan]

@@ -93,25 +93,78 @@ extern client_runtime_config_t g_uds_cfg;
 | `--extid` | 使用扩展帧 ID |
 | `--tcp-host <addr>` | 调试 TCP host |
 | `--tcp-port <port>` | 调试 TCP 端口 |
-| `--ipc-tcp` | 调试时改用 TCP JSONL，而不是 stdio JSONL |
+| `--ipc-tcp` | 从默认的长度前缀 stdio 包切换到调试 TCP JSONL |
 | `--no-auto-spawn` | 不由 C 客户端自动拉起 Python sidecar |
 
-## 4. UDS context API
+
+## 4. 启动行为与命令面
+
+头文件：`client_demo/core/client.h`
+
+### 4.1 `main.c` 中的启动序列
+
+命令注册完成后，客户端按如下 best-effort 顺序执行：
+
+1. 初始化 `uds_context`
+2. 尝试切换到 `0x03` 会话
+3. 尝试做 `0x01` 安全访问
+4. 通过 0x31 控制台辅助同步远端命令缓存
+5. 自动开启 0x2A ULOG 流
+6. 即使自动连接失败，也会进入交互 Shell
+
+退出路径也会在 `uds_context_deinit()` 之前尝试关闭 0x2A 流。
+
+### 4.2 内建与服务命令
+
+| 命令 | 模块 | 作用 |
+| --- | --- | --- |
+| `help` | `core/client_shell*.c` | 显示本地帮助，并触发远端帮助路径 |
+| `exit` | `core/client_shell*.c` | 退出 Shell |
+| `session` | `services/client_0x10_session.c` | 诊断会话控制（`0x10`） |
+| `er` | `services/client_0x11_reset.c` | ECU Reset（`0x11`） |
+| `rdbi` | `services/client_0x22_0x2E_param.c` | Read Data By Identifier（`0x22`） |
+| `wdbi` | `services/client_0x22_0x2E_param.c` | Write Data By Identifier（`0x2E`） |
+| `auth` | `services/client_0x27_security.c` | Security Access（`0x27`） |
+| `cc` | `services/client_0x28_comm.c` | Communication Control（`0x28`） |
+| `ulog2a` | `services/client_0x2A_ulog.c` | 通过 `0x2A` 开启 / 关闭周期 ULOG 流 |
+| `io` | `services/client_0x2F_io.c` | InputOutputControlByIdentifier（`0x2F`） |
+| `rexec` | `services/client_0x31_console.c` | 显式执行远端控制台命令 |
+| `cd` | `services/client_0x31_console.c` | 切换远端工作目录 |
+| `lls` | `services/client_0x36_0x37_0x38_file.c` | 列出本地文件 |
+| `sy` | `services/client_0x36_0x37_0x38_file.c` | 通过 UDS 文件传输流程上传文件 |
+| `ry` | `services/client_0x36_0x37_0x38_file.c` | 通过 UDS 文件传输流程下载文件 |
+
+### 4.3 公共 client 辅助函数
+
+| 函数 | 作用 |
+| --- | --- |
+| `void client_0x10_init(void);` ... `void client_file_svc_init(void);` | 注册各服务命令处理器 |
+| `int client_request_session(uint8_t session_type);` | 发起诊断会话切换 |
+| `int client_perform_security(uint8_t level);` | 执行指定 level 的安全访问 |
+| `int client_send_console_command(const char *cmd_str);` | 通过 0x31 发送远端控制台命令 |
+| `int client_sync_remote_commands(void);` | 刷新远端命令缓存 |
+| `int client_0x2A_ulog_auto_start(void);` | best-effort 自动开启 0x2A 流 |
+| `int client_0x2A_ulog_auto_stop(void);` | 对 0x2A 流执行 stop-all |
+| `int client_console_get_cmd_count(void);` / `const char *client_console_get_cmd_name(int index);` | 查询远端命令缓存 |
+| `int client_console_get_file_count(void);` / `const char *client_console_get_file_name(int index);` | 查询远端文件缓存 |
+
+## 5. UDS context API
 
 头文件：`client_demo/core/uds_context.h`
 
-### 4.1 生命周期
+### 5.1 生命周期
 
 | 函数 | 作用 |
 | --- | --- |
 | `UDSClient_t *uds_get_client(void);` | 获取单例 client 实例 |
 | `uint8_t uds_get_last_nrc(void);` | 读取最近一次 NRC |
+| `uint32_t uds_get_transport_activity_ms(void);` | 查询最近一次 transport 活动时间戳 |
 | `int uds_context_init(void);` | 初始化 transport 与 UDS client 状态 |
 | `void uds_context_deinit(void);` | 关闭 transport 并重置上下文 |
 | `void uds_register_disconnect_callback(uds_disconnect_callback_t cb);` | 注册断链回调 |
 | `void uds_register_unsolicited_payload_callback(uds_unsolicited_payload_callback_t cb);` | 注册非请求型 payload 回调 |
 
-### 4.2 事务辅助接口
+### 5.2 事务辅助接口
 
 | 函数 / 宏 | 作用 |
 | --- | --- |
@@ -120,11 +173,18 @@ extern client_runtime_config_t g_uds_cfg;
 | `UDS_TRANSACTION(send_call, msg)` | 使用默认超时的便捷事务封装 |
 | `UDS_TRANSACTION_TIMEOUT(send_call, msg, ms)` | 自定义超时的事务封装 |
 
-## 5. Transport 抽象 API
+### 5.3 低层运行辅助
+
+| 函数 | 作用 |
+| --- | --- |
+| `void uds_poll(void);` | 驱动 UDS 状态机 |
+| `int uds_send_heartbeat_safe(void);` | 仅在客户端空闲时发送 TesterPresent |
+
+## 6. Transport 抽象 API
 
 头文件：`client_demo/transport/transport.h`
 
-### 5.1 后端选择与配置
+### 6.1 后端选择与配置
 
 | 枚举 / 类型 | 作用 |
 | --- | --- |
@@ -134,7 +194,7 @@ extern client_runtime_config_t g_uds_cfg;
 | `uds_transport_tsmaster_cfg_t` | 历史 Windows SDK 路径配置 |
 | `uds_transport_pycan_bridge_cfg_t` | Windows Python sidecar 配置 |
 
-### 5.2 公共 transport 函数
+### 6.2 公共 transport 函数
 
 | 函数 | 作用 |
 | --- | --- |
@@ -146,10 +206,11 @@ extern client_runtime_config_t g_uds_cfg;
 | `int uds_transport_poll(uds_transport_t *tp);` | 轮询后端 |
 | `void uds_transport_set_timeout(uds_transport_t *tp, uint32_t timeout_ms);` | 更新 transport 超时 |
 | `int uds_transport_get_last_error(uds_transport_t *tp);` | 查询最近一次后端错误 |
+| `uint32_t uds_transport_get_last_activity_ms(uds_transport_t *tp);` | 查询最近一次活动时间戳 |
 | `UDSTp_t *uds_transport_get_tp_handle(uds_transport_t *tp);` | 获取内嵌 ISO-TP 句柄 |
 | `void uds_transport_set_error_callback(uds_transport_t *tp, uds_transport_error_callback_t cb, void *user);` | 注册异步 transport 错误回调 |
 
-## 6. 后端模块
+## 7. 后端模块
 
 | 文件 | 作用 |
 | --- | --- |
@@ -157,23 +218,25 @@ extern client_runtime_config_t g_uds_cfg;
 | `client_demo/transport/transport_pycan_bridge.c` | Windows Python sidecar bridge 后端 |
 | `client_demo/transport/transport_tsmaster_api.c` | 历史 TSMaster smoke 后端 |
 
-## 7. Python side bridge 接口面
+## 8. Python side bridge 接口面
 
 核心文件：
 
 - `client_demo/tools/pycan_bridge.py`
 - `client_demo/tools/pycan_runtime.py`
 - `client_demo/tools/requirements-pycan.txt`
+- `client_demo/tools/pycan_smoke.py`
 
-### 7.1 Bridge 职责划分
+### 8.1 Bridge 职责划分
 
 | 层 | 职责 |
 | --- | --- |
 | `pycan_bridge.py` | 命令服务器与会话生命周期 |
-| `pycan_runtime.py` | 依赖加载、接口校验、bus 打开与公共辅助函数 |
+| `pycan_runtime.py` | 依赖加载、接口校验、stdio 包辅助、bus 打开与公共辅助函数 |
 | `requirements-pycan.txt` | Python 侧可复现依赖清单 |
+| `pycan_smoke.py` | `gs_usb` / `slcan` 独立探测脚本 |
 
-### 7.2 Bridge 协议定位
+### 8.2 Bridge 协议定位
 
 当前仓库中，Python 侧只负责：
 
@@ -182,23 +245,32 @@ extern client_runtime_config_t g_uds_cfg;
 - 接收原始 CAN 帧
 - 向 C 后端回传事件
 
+当前协议层还需要注意：
+
+- C 后端使用的协议版本是 `pycan-bridge/2`
+- 默认 stdio 热路径使用**长度前缀包**，包内承载 **JSON 元数据** 与可选的原始帧 payload
+- TCP 模式仅保留为**调试回退路径**，该路径才使用 JSONL
+- bridge 消息类型包括 `hello`、`open`、`ping`、`tx`、`close`
+
 C 侧仍然持有 **UDS 状态**、**ISO-TP 状态** 与 **服务命令流程**。
 
-## 8. RT-Thread 服务端 API
+> 说明：公开头文件中的枚举名 `UDS_PYCAN_BRIDGE_IPC_STDIO_JSONL` 仍为兼容性保留，但当前 stdio 实现已经不是 JSONL 文本热路径，而是包封装实现。
+
+## 9. RT-Thread 服务端 API
 
 核心头文件：
 
 - `server_demo/iso14229_rtt.h`
 - `server_demo/rtt_uds_config.h`
 
-### 8.1 环境生命周期
+### 9.1 环境生命周期
 
 | 函数 | 作用 |
 | --- | --- |
 | `rtt_uds_env_t *rtt_uds_create(const rtt_uds_config_t *cfg);` | 创建并初始化一个 RT-Thread UDS 环境 |
 | `void rtt_uds_destroy(rtt_uds_env_t *env);` | 停止并销毁环境 |
 
-### 8.2 服务注册
+### 9.2 服务注册
 
 | 函数 | 作用 |
 | --- | --- |
@@ -206,13 +278,13 @@ C 侧仍然持有 **UDS 状态**、**ISO-TP 状态** 与 **服务命令流程**�
 | `void rtt_uds_service_unregister(uds_service_node_t *node);` | 注销一个服务节点 |
 | `void rtt_uds_service_unregister_all(rtt_uds_env_t *env);` | 清空整个分发表 |
 
-### 8.3 CAN 输入路径
+### 9.3 CAN 输入路径
 
 | 函数 | 作用 |
 | --- | --- |
 | `rt_err_t rtt_uds_feed_can_frame(rtt_uds_env_t *env, struct rt_can_msg *msg);` | 将一帧接收到的 CAN 数据送入 UDS 环境 |
 
-### 8.4 常用宏
+### 9.4 常用宏
 
 | 宏 | 作用 |
 | --- | --- |
@@ -222,7 +294,7 @@ C 侧仍然持有 **UDS 状态**、**ISO-TP 状态** 与 **服务命令流程**�
 | `RTT_UDS_SERVICE_DEFINE_OPS_PRO(...)` | 生成带显式优先级与上下文的包装函数 |
 | `RTT_UDS_SERVICE_DEFINE_OPS(...)` | 使用默认优先级与空上下文的简化包装函数 |
 
-## 9. 构建侧接口地图
+## 10. 构建侧接口地图
 
 | 文件 | 作用 |
 | --- | --- |
@@ -233,7 +305,7 @@ C 侧仍然持有 **UDS 状态**、**ISO-TP 状态** 与 **服务命令流程**�
 | `server_demo/Kconfig` | RT-Thread 功能开关 |
 | `server_demo/SConscript` | RT-Thread 源码集成入口 |
 
-## 10. 推荐扩展点
+## 11. 推荐扩展点
 
 ### 新增一个客户端服务命令
 

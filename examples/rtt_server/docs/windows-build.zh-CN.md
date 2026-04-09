@@ -102,7 +102,25 @@ py -3 -m venv .venv
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if slcan --py-channel COM4@9600 --bitrate 1000000
 ```
 
-## 5. `gs_usb` 和 `slcan` 的区别
+## 5. 当前 Windows 文档里支持哪些 CAN 硬件
+
+按照当前仓库文档和 CLI 参数校验，Windows 侧目前只明确支持 **三类硬件路径**：
+
+1. 通过 `PYCAN_BRIDGE` 使用的 **`gs_usb` 类 USB CAN 适配器**
+   - 例如：candleLight / CANable / canlight 风格设备，或其他能被 `gs_usb` 栈识别的适配器
+   - 典型参数：`--py-if gs_usb --py-channel 0`
+2. 通过 `PYCAN_BRIDGE` 使用的 **`slcan` / LAWICEL 风格串口 CAN 适配器**
+   - 例如：在 Windows 下表现为 `COM` 口，并通过 SLCAN 兼容串口协议访问的设备
+   - 典型参数：`--py-if slcan --py-channel COM4@9600`
+3. 通过历史 `TSMASTER_API` smoke 路径访问的 **TSMaster SDK 绑定适配器**
+   - 只适用于已经具备匹配 TSMaster SDK 目录与库文件的环境
+   - 这 **不是** 当前默认 Windows 路径
+
+### 重要边界说明
+
+虽然 `python-can` 本身还能支持更多接口族，但**本仓库当前默认 Windows 路径只校验并文档化了 `gs_usb` 和 `slcan`**。也就是说，当前 CLI 会拒绝其他 `--py-if` 取值，因此像 PCAN、Vector、Kvaser、ZLG、Canalyst 这类适配器，**在当前仓库里不应直接宣称为已支持**，除非后续先扩展代码路径。
+
+## 6. `gs_usb` 和 `slcan` 的区别
 
 | 接口 | 含义 | 典型 channel 示例 | 适用场景 |
 | --- | --- | --- | --- |
@@ -115,7 +133,7 @@ py -3 -m venv .venv
 
 如果设备表现为 COM 口，或厂家文档明确写的是 SLCAN 兼容串口协议，就选 `slcan`。
 
-## 6. 为什么 Windows 不能直接复用 Linux 的终端实现
+## 7. 为什么 Windows 不能直接复用 Linux 的终端实现
 
 Windows 构建会编译：
 
@@ -133,7 +151,7 @@ Windows 构建会编译：
 
 所以项目不是简单复用 Linux shell，而是在保持命令模型一致的前提下，为 Windows 提供了独立 console 实现。
 
-## 7. 为什么 Windows 一般会比 Linux 更慢
+## 8. 为什么 Windows 一般会比 Linux 更慢
 
 在这个仓库里，Windows 客户端通常会比 Linux 路径多一层甚至多层软件栈。
 
@@ -143,12 +161,12 @@ Linux 推荐路径：
 
 Windows 推荐路径：
 
-`client -> transport_pycan_bridge -> stdio JSONL -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
+`client -> transport_pycan_bridge -> stdio 包 IPC -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
 
 所以 Windows 端常见的额外开销来自：
 
 - **多一个 Python sidecar 进程**
-- **C/Python 之间的 JSON Lines 序列化与反序列化**
+- **C/Python 之间的包封装与元数据序列化 / 反序列化**
 - **子进程管道与 stdio 刷新**
 - **`python-can` 适配层本身的用户态开销**
 - **若走 `slcan`，还会叠加串口 ASCII 协议开销**
@@ -161,7 +179,7 @@ Windows 推荐路径：
 - 尽量让 client 与 bridge 在同一台机器上本地运行
 - 如果你主要做高频交互或时延敏感调试，优先选择 Linux 主机路径
 
-## 8. 构建历史 `TSMASTER_API` smoke 目标
+## 9. 构建历史 `TSMASTER_API` smoke 目标
 
 只有在你已经具备匹配 TSMaster SDK 的前提下，才建议使用这一条路径。
 
@@ -180,7 +198,7 @@ cmake --preset windows-tsmaster-mingw64-inline-sdk
 cmake --build --preset build-client-smoke-inline-sdk
 ```
 
-## 9. 常见问题
+## 10. 常见问题
 
 ### CMake 提示 Windows 支持未启用
 

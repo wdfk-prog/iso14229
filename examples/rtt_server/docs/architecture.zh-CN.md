@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph Windows[Windows 路径]
         TPWIN[transport_pycan_bridge.c]
-        IPC[本地 stdio JSONL]
+        IPC[长度前缀 stdio 包 IPC]
         PY[tools/pycan_bridge.py]
         PYCAN[python-can]
         ADAPTER[gs_usb / slcan]
@@ -73,7 +73,7 @@ flowchart LR
     C --> D[初始化 uds_context]
     D --> E[打开 transport 后端]
     E --> F[构建 UDS client 实例]
-    F --> G[尝试切会话并按需执行安全访问]
+    F --> G[切到 0x03 会话 -> 0x01 安全访问 -> 同步命令 -> 自动开启 0x2A]
     G --> H[启动交互 shell]
     H --> I[命令分发到服务处理器]
     I --> J[执行 UDS 请求 / 响应事务]
@@ -118,14 +118,14 @@ sequenceDiagram
     User->>Shell: 输入命令
     Shell->>Client: 调用服务封装
     Client->>TP: uds_transport_send / poll
-    TP->>Bridge: 通过 stdio 发送 JSON Lines 指令
+    TP->>Bridge: 通过 stdio 发送长度前缀包
     Bridge->>PyCan: open/send/recv 原始 CAN 帧
     PyCan->>Adapter: 适配器 I/O
     Adapter->>ECU: CAN 流量
     ECU-->>Adapter: 返回响应帧
     Adapter-->>PyCan: 帧接收
     PyCan-->>Bridge: CAN message
-    Bridge-->>TP: JSON Lines 事件
+    Bridge-->>TP: 控制 / 帧事件包
     TP-->>Client: 推进 ISO-TP 状态机
     Client-->>Shell: 打印结果
 ```
@@ -248,12 +248,12 @@ Linux 当前链路是：
 
 Windows 当前链路是：
 
-`client.exe -> transport_pycan_bridge.c -> 子进程 stdio JSON Lines -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
+`client.exe -> transport_pycan_bridge.c -> 子进程 stdio 包 IPC -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
 
 它的特点是：
 
 - 至少包含 **C 进程 + Python sidecar 两个执行体**
-- C 与 Python 之间要做 **JSON Lines 编码 / 解码**
+- C 与 Python 之间要做 **包封装以及元数据编码 / 解码**
 - 帧收发要经过 **子进程管道 / stdio IPC**
 - `python-can` 再继续调用具体适配器后端
 - `slcan` 场景下还会再叠加 **串口 ASCII 协议** 开销
@@ -263,7 +263,7 @@ Windows 当前链路是：
 在本仓库实现里，Windows 侧常见的额外开销主要来自：
 
 1. **额外的进程边界**：一次事务要跨过 C 进程与 Python 进程
-2. **额外的数据封装**：CAN 帧在桥接层被序列化成 JSON Lines 文本，再由另一侧反序列化
+2. **额外的包和元数据处理**：热路径会把消息封装成长度前缀包，并在两侧继续解析元数据
 3. **额外的调度与缓冲**：子进程管道、stdio 刷新和线程调度都会引入额外延迟
 4. **用户态适配器访问**：Linux 直接走内核 ISO-TP socket；Windows 当前默认路径要先落到 `python-can` 适配层
 5. **`slcan` 的协议特性**：如果设备走串口 SLCAN，ASCII 命令/响应链路通常比原生 USB CAN 路径更重

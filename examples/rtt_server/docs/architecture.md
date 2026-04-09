@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph Windows[Windows path]
         TPWIN[transport_pycan_bridge.c]
-        IPC[local stdio JSONL]
+        IPC[length-prefixed stdio packet IPC]
         PY[tools/pycan_bridge.py]
         PYCAN[python-can]
         ADAPTER[gs_usb / slcan]
@@ -73,7 +73,7 @@ flowchart LR
     C --> D[Initialize uds_context]
     D --> E[Open transport backend]
     E --> F[Build UDS client instance]
-    F --> G[Try session switch and optional security flow]
+    F --> G[Session 0x03 -> Security 0x01 -> Sync commands -> Auto-start 0x2A]
     G --> H[Start interactive shell]
     H --> I[Command dispatch to service handlers]
     I --> J[UDS request / response transaction]
@@ -118,14 +118,14 @@ sequenceDiagram
     User->>Shell: enter command
     Shell->>Client: call service helper
     Client->>TP: uds_transport_send / poll
-    TP->>Bridge: JSON Lines command over stdio
+    TP->>Bridge: length-prefixed stdio packet
     Bridge->>PyCan: open/send/recv raw CAN frames
     PyCan->>Adapter: adapter-specific I/O
     Adapter->>ECU: CAN traffic
     ECU-->>Adapter: response frames
     Adapter-->>PyCan: frame receive
     PyCan-->>Bridge: CAN message
-    Bridge-->>TP: JSON Lines event
+    Bridge-->>TP: control / frame packet
     TP-->>Client: feed ISO-TP state machine
     Client-->>Shell: print result
 ```
@@ -248,12 +248,12 @@ Its characteristics are:
 
 The current Windows chain is:
 
-`client.exe -> transport_pycan_bridge.c -> child-process stdio JSON Lines -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
+`client.exe -> transport_pycan_bridge.c -> child-process stdio packet IPC -> pycan_bridge.py -> python-can -> gs_usb/slcan -> ECU`
 
 Its characteristics are:
 
 - it involves at least **two executables: the C client and the Python sidecar**
-- the bridge must do **JSON Lines encoding and decoding** between C and Python
+- the bridge must do **packet framing plus metadata encoding/decoding** between C and Python
 - frame traffic crosses **child-process pipes / stdio IPC**
 - `python-can` then dispatches to the concrete adapter backend
 - in `slcan` mode, the stack adds **serial ASCII protocol overhead** on top
@@ -263,7 +263,7 @@ Its characteristics are:
 In this repository, the most common extra costs on Windows are:
 
 1. **an extra process boundary** between the C client and the Python bridge
-2. **extra data wrapping**, because CAN frames are serialized into JSON Lines text and then parsed again
+2. **extra packet and metadata handling**, because the hot path frames messages into length-prefixed packets and still parses metadata on both sides
 3. **extra scheduling and buffering**, including child-process pipes, stdio flushing, and thread scheduling
 4. **user-space adapter access**, whereas Linux goes straight to the kernel ISO-TP socket path
 5. **`slcan` protocol overhead**, because serial SLCAN transport is typically heavier than a native USB CAN path
