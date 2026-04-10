@@ -25,9 +25,30 @@ API status: Major version zero (0.y.z) **(not yet stable)**. Anything MAY change
 - multiple transports supported: isotp-c, linux isotp sockets
 - examples for esp32, RT-Thread, Arduino, NXP S32K144
 
+## RT-Thread server and host client demo
+
+The repository now includes a dedicated `examples/rtt_server/` workspace for **RT-Thread server integration** and **host-side client execution**. It is the fastest path when you want a complete diagnostic flow instead of only the standalone `iso14229.c/.h` library.
+
+### What `rtt_server` provides
+
+- **`server_demo/`**: RT-Thread-side adapter, service registration, Kconfig / SConscript integration, and ready-to-run service handlers for the RT-Thread target.
+- **`client_demo/`**: host-side UDS client for Linux and Windows, including interactive shell, transport abstraction, file transfer helpers, and diagnostic service command sets.
+- **Cross-platform transport options**: Linux SocketCAN ISO-TP path, Windows `pycan_bridge` path, and the legacy TSMaster smoke path for SDK-bound environments.
+- **Service coverage reference**: session control, reset, security access, DID read/write, communication control, routine control, ULOG / periodic reporting, file transfer, and related protocol workflows.
+
+### Where to start
+
+- **Online client demo documentation**: <https://wdfk-prog.space/iso14229/client_demo/>
+- **RT-Thread workspace overview**: [examples/rtt_server/README.md](./examples/rtt_server/README.md)
+- **RT-Thread portal in the root docs set**: [docs/rtt_server.md](./docs/rtt_server.md)
+- **Detailed example guides**: [examples/rtt_server/docs](./examples/rtt_server/docs)
+
 # Documentation
 
-Here https://driftregion.github.io/iso14229/ and also in [./docs](./docs)
+- Main API site: <https://driftregion.github.io/iso14229/>
+- Local docs entry: [./docs](./docs)
+- RT-Thread documentation portal: [docs/rtt_server.md](./docs/rtt_server.md)
+- Online client demo site: <https://wdfk-prog.space/iso14229/client_demo/>
 
 # Contributing
 

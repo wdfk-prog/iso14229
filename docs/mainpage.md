@@ -11,6 +11,15 @@ iso14229 is a UDS (ISO14229) library for writing servers and clients.
 
 ---
 
+## RT-Thread demo focus {#rtt_server_focus}
+
+The repository includes a full RT-Thread diagnostic workspace under `examples/rtt_server/` for teams that need a **target-side RT-Thread server** and a **host-side Linux / Windows client** in the same tree.
+
+- [Portal page](rtt_server.md)
+- [Workspace overview](../examples/rtt_server/README.md)
+- Server integration notes are documented in the `server_demo/` submodule documentation set.
+- Online client demo site: <https://wdfk-prog.space/iso14229/client_demo/>
+
 ## Examples {#examples_sec}
 
 To access the examples, clone or download the repository from https://github.com/driftregion/iso14229

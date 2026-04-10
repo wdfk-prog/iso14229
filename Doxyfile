@@ -122,11 +122,17 @@ INPUT                  = docs/mainpage.md \
                          docs/client.md \
                          docs/server.md \
                          docs/services.md \
+                         docs/rtt_server.md \
                          iso14229.h \
                          iso14229.c \
                          examples/arduino_server/README.md \
                          examples/esp32_server/README.md \
                          examples/rtt_server/README.md \
+                         examples/rtt_server/docs/architecture.md \
+                         examples/rtt_server/docs/api-reference.md \
+                         examples/rtt_server/docs/linux-build.md \
+                         examples/rtt_server/docs/windows-build.md \
+                         examples/rtt_server/docs/pycan-pip-workflow.md \
                          examples/linux_server/README.md \
                          examples/linux_rdbi_wdbi/README.md \
                          examples/linux_server_0x27/README.md \

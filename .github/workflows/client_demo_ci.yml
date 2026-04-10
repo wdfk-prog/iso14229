@@ -1,0 +1,151 @@
+name: client_demo CI
+
+on:
+  push:
+    branches: [ main, rtt ]
+    paths:
+      - .github/workflows/client_demo_ci.yml
+      - examples/rtt_server/client_demo/**
+      - examples/rtt_server/iso14229.c
+      - examples/rtt_server/iso14229.h
+  pull_request:
+    branches: [ main, rtt ]
+    paths:
+      - .github/workflows/client_demo_ci.yml
+      - examples/rtt_server/client_demo/**
+      - examples/rtt_server/iso14229.c
+      - examples/rtt_server/iso14229.h
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-demo-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cppcheck-report:
+    name: Static analysis report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    defaults:
+      run:
+        working-directory: examples/rtt_server/client_demo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck (report + log)
+        shell: bash
+        run: |
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --inconclusive \
+            --std=c11 \
+            --force \
+            --quiet \
+            --suppress=missingInclude \
+            --suppress=missingIncludeSystem \
+            -I. \
+            -Icore \
+            -Iservices \
+            -Iutils \
+            -Iplatform \
+            -Itransport \
+            -I.. \
+            main.c core services utils platform transport ../iso14229.c \
+            2> >(tee cppcheck.txt >&2)
+
+      - name: Upload cppcheck report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-demo-cppcheck-report
+          path: examples/rtt_server/client_demo/cppcheck.txt
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux client_demo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential linux-libc-dev
+
+      - name: Configure Linux build
+        run: |
+          cmake \
+            -S examples/rtt_server/client_demo \
+            -B examples/rtt_server/client_demo/build-ci-linux \
+            -G Ninja
+
+      - name: Build Linux target
+        run: |
+          cmake --build examples/rtt_server/client_demo/build-ci-linux --parallel
+
+      - name: Smoke test help output
+        run: |
+          examples/rtt_server/client_demo/build-ci-linux/client --help
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-demo-linux
+          path: examples/rtt_server/client_demo/build-ci-linux/client
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows client_demo
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: examples/rtt_server/client_demo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Configure Windows build
+        run: |
+          rm -rf build-mingw64
+          cmake --preset windows-pycan-mingw64
+
+      - name: Build Windows target
+        run: |
+          cmake --build --preset build-client-pycan --parallel
+
+      - name: Smoke test help output
+        run: |
+          ./build-mingw64/client.exe --help
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-demo-windows
+          path: examples/rtt_server/client_demo/build-mingw64/client.exe
+          if-no-files-found: error
