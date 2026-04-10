@@ -76,7 +76,7 @@ Generated binary:
 client_demo/build-mingw64/client.exe
 ```
 
-## 3. Create the Python environment for the sidecar
+## 3. Create the Python environment for the sidecar when running from the source tree
 
 From the repository root in PowerShell:
 
@@ -88,21 +88,84 @@ py -3 -m venv .venv
 
 See [Python / pip Workflow](pycan-pip-workflow.md) for package-level reasoning.
 
-## 4. Run the Windows client
+## 4. Run the Windows client from the source tree
 
-### `gs_usb` example
+### `gs_usb` example from the source tree
 
 ```powershell
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if gs_usb --py-channel 0 --bitrate 1000000
 ```
 
-### `slcan` example
+### `slcan` example from the source tree
 
 ```powershell
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if slcan --py-channel COM4@9600 --bitrate 1000000
 ```
 
-## 5. What CAN hardware is currently supported on Windows
+## 5. Run the downloaded Windows release package
+
+If you download the prebuilt **Windows release ZIP**, extract it and run the executable from the package root.
+
+The packaged release already contains:
+
+- `client.exe`
+- `python.exe`
+- the embedded Python runtime files and `python*._pth`
+- standard-library extension modules under `runtime/pyd`
+- Python bridge dependencies under `Lib/site-packages`
+- `tools/pycan_bridge.py` and `tools/pycan_runtime.py`
+
+So the release package does **not** require:
+
+- a separately installed system Python
+- `--python`
+- `--bridge-script`
+
+### Canonical release-package commands
+
+#### `gs_usb`
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 1000000
+```
+
+#### `slcan`
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if slcan --py-channel COM4@9600 --bitrate 1000000
+```
+
+### Parameter summary for the downloaded `client.exe`
+
+| Option | Meaning | Typical value in the documents |
+| --- | --- | --- |
+| `-i` | logical client interface name used by the shell / transport config | `can1` |
+| `-s` | tester physical source address | `7D1` |
+| `-t` | ECU physical target address | `7E1` |
+| `-f` | functional target address | `7E0` |
+| `-b` | transport backend | `pycan_bridge` |
+| `--py-if` | Python bridge adapter family | `gs_usb` or `slcan` |
+| `--py-channel` | channel identifier passed to the selected Python bridge backend | `0` or `COM4@9600` |
+| `--bitrate` | CAN nominal bitrate | `1000000` |
+
+### How to choose the Python bridge parameters
+
+- Use `--py-if gs_usb --py-channel 0` for `gs_usb`-class USB CAN adapters. Increment the channel number when multiple devices are present.
+- Use `--py-if slcan --py-channel COMx@baud` for SLCAN / LAWICEL-style serial adapters, for example `COM4@9600`.
+- Keep `-s`, `-t`, and `-f` aligned with the addressing used by your ECU and tester setup.
+- Keep `--bitrate` aligned with the actual CAN bus bitrate.
+
+### What success vs failure looks like
+
+If the packaged runtime is working, the startup log should at least reach:
+
+```text
+[Context] UDS Context Initialized (backend=pycan_bridge if=...)
+```
+
+If you then see negative responses such as `NRC: 0xFF`, that is already beyond release-package startup and usually points to ECU / session / service-side conditions rather than the packaged Python runtime itself.
+
+## 6. What CAN hardware is currently supported on Windows
 
 The current repository documentation and CLI validation only document **three Windows hardware paths**:
 
@@ -120,7 +183,7 @@ The current repository documentation and CLI validation only document **three Wi
 
 Although `python-can` supports more interface families in general, **this repository currently validates only `gs_usb` and `slcan` for the default Windows path**. The current CLI rejects other `--py-if` values, so adapters such as PCAN, Vector, Kvaser, ZLG, or Canalyst should **not** be described as supported in this repository unless the code path is extended first.
 
-## 6. `gs_usb` vs `slcan`
+## 7. `gs_usb` vs `slcan`
 
 | Interface | What it represents | Typical channel example | When to choose |
 | --- | --- | --- | --- |
@@ -133,7 +196,7 @@ Choose `gs_usb` first when the adapter is detected and supported.
 
 Choose `slcan` when the device is presented as a COM port or documented as an SLCAN-compatible serial adapter.
 
-## 7. Why the Windows shell is separate from Linux
+## 8. Why the Windows shell is separate from Linux
 
 The Windows build compiles:
 
@@ -151,7 +214,7 @@ That is deliberate because the Windows console path must manage:
 
 So the project does not reuse the Linux shell blindly. It keeps the command model the same, but uses a Windows-specific console implementation.
 
-## 8. Why Windows is usually slower than Linux
+## 9. Why Windows is usually slower than Linux
 
 In this repository, the Windows client usually carries a longer software path than the Linux path.
 
@@ -179,7 +242,7 @@ So the accurate statement is: **Windows is not automatically slower as an operat
 - Keep the client and bridge on the same machine.
 - Prefer the Linux host path for high-frequency or latency-sensitive diagnostic work.
 
-## 9. Build the legacy `TSMASTER_API` smoke target
+## 10. Build the legacy `TSMASTER_API` smoke target
 
 Use this only when the matching TSMaster SDK is already available.
 
@@ -198,7 +261,7 @@ cmake --preset windows-tsmaster-mingw64-inline-sdk
 cmake --build --preset build-client-smoke-inline-sdk
 ```
 
-## 10. Common problems
+## 11. Common problems
 
 ### CMake says Windows support is disabled
 

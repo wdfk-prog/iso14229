@@ -31,6 +31,12 @@ The repository’s Linux path is intentionally simple:
 
 That keeps the Linux build as a **single native C executable**.
 
+## Release artifact note
+
+The repository CI currently publishes the Linux release artifact from the standard `ubuntu-latest` x86-64 runner path, so the downloadable prebuilt Linux binary should be treated as an **x86-64 (`amd64`) build**.
+
+If your target machine is **ARM / AArch64 / armhf** or any other non-x86-64 Linux architecture, do **not** expect the published Linux release binary to run directly. Build it yourself with the appropriate cross toolchain or on a native target of the same architecture.
+
 ## Prerequisites
 
 - Linux host or Linux build container
@@ -70,7 +76,7 @@ Generated binary:
 client_demo/client
 ```
 
-### Option C: cross build with the provided toolchain file
+### Option C: cross build with the provided toolchain file (recommended for ARM targets)
 
 ```bash
 cd client_demo

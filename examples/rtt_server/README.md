@@ -189,6 +189,26 @@ This gives one USB-oriented path and one serial-oriented fallback without inflat
 | Windows Python runtime | `client_demo/tools/` | [Python / pip Workflow](docs/pycan-pip-workflow.md) |
 | Public interfaces and API map | `docs/` | [API Reference](docs/api-reference.md) |
 
+## Prebuilt release binaries
+
+### Windows release ZIP
+
+The downloadable Windows release package is designed to be run directly after extraction. The package root already contains the embedded Python runtime and bridge dependencies, so the documented invocation is:
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 1000000
+```
+
+Use `--py-if slcan --py-channel COM4@9600` for SLCAN / LAWICEL-style serial adapters.
+
+See [Windows Build Guide](docs/windows-build.md) for the full parameter table and runtime notes.
+
+### Linux release binary architecture
+
+The downloadable Linux release binary is currently an **x86-64 (`amd64`) build** from the standard CI runner. If your target is ARM or another non-x86-64 Linux architecture, build it yourself with the correct cross toolchain or on a native machine of the same architecture.
+
+See [Linux Build and Run Guide](docs/linux-build.md) for native and cross-build examples.
+
 ## Quick start
 
 ### 1. Server-side integration

@@ -188,6 +188,26 @@ Linux 已经提供原生 SocketCAN 栈与 ISO-TP socket API，因此客户端可
 | Windows Python 运行时 | `client_demo/tools/` | [pip 工作流文档](docs/pycan-pip-workflow.zh-CN.md) |
 | 公共接口与 API 地图 | `docs/` | [API 参考](docs/api-reference.zh-CN.md) |
 
+## 预编译发布包说明
+
+### Windows 发布包
+
+下载得到的 Windows release ZIP 解压后即可直接运行。发布包根目录已经内置嵌入式 Python 运行时与 bridge 依赖，因此推荐调用方式为：
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 1000000
+```
+
+如果使用的是 SLCAN / LAWICEL 风格串口适配器，则改用 `--py-if slcan --py-channel COM4@9600`。
+
+完整参数说明和运行时说明请看 [Windows 编译文档](docs/windows-build.zh-CN.md)。
+
+### Linux 发布二进制架构
+
+当前下载得到的 Linux release 二进制是标准 CI 产出的 **x86-64 (`amd64`) 架构**。如果目标机是 ARM 或其他非 x86-64 Linux 架构，需要使用正确的交叉工具链，或直接在同架构机器上自行编译。
+
+原生构建和交叉构建说明请看 [Linux 编译与运行文档](docs/linux-build.zh-CN.md)。
+
 ## 快速开始
 
 ### 1. 服务端集成

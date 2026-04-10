@@ -31,6 +31,12 @@
 
 这样 Linux 构建产物就是一个 **单体原生 C 可执行文件**。
 
+## 发布二进制说明
+
+当前仓库 CI 产出的 Linux release 二进制来自标准 `ubuntu-latest` 的 x86-64 runner，因此下载得到的 Linux 预编译程序应视为 **x86-64 (`amd64`) 架构**。
+
+如果你的目标机是 **ARM / AArch64 / armhf** 或其他非 x86-64 Linux 架构，请不要直接假定发布页上的 Linux 二进制可以运行。你需要使用对应交叉工具链，或者直接在同架构目标机上自行编译。
+
 ## 前置条件
 
 - Linux 主机或 Linux 构建容器
@@ -70,7 +76,7 @@ make
 client_demo/client
 ```
 
-### 方式 C：使用仓库自带 toolchain 文件做交叉构建
+### 方式 C：使用仓库自带 toolchain 文件做交叉构建（ARM 目标推荐）
 
 ```bash
 cd client_demo

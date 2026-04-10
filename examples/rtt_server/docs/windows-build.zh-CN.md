@@ -76,7 +76,7 @@ cmake --build --preset build-client-pycan
 client_demo/build-mingw64/client.exe
 ```
 
-## 3. 为 sidecar 创建 Python 环境
+## 3. 从源码树运行时，为 sidecar 创建 Python 环境
 
 在仓库根目录的 PowerShell 中执行：
 
@@ -88,21 +88,84 @@ py -3 -m venv .venv
 
 每个包为什么要装，请继续看 [Python / pip 工作流](pycan-pip-workflow.zh-CN.md)。
 
-## 4. 运行 Windows 客户端
+## 4. 从源码树运行 Windows 客户端
 
-### `gs_usb` 示例
+### 从源码树运行的 `gs_usb` 示例
 
 ```powershell
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if gs_usb --py-channel 0 --bitrate 1000000
 ```
 
-### `slcan` 示例
+### 从源码树运行的 `slcan` 示例
 
 ```powershell
 .\client_demo\build-mingw64\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --python .\.venv\Scripts\python.exe --bridge-script client_demo\tools\pycan_bridge.py --py-if slcan --py-channel COM4@9600 --bitrate 1000000
 ```
 
-## 5. 当前 Windows 文档里支持哪些 CAN 硬件
+## 5. 运行下载得到的 Windows 发布包
+
+如果你下载的是预构建好的 **Windows release ZIP**，解压后直接在发布包根目录运行即可。
+
+当前发布包已经内置：
+
+- `client.exe`
+- `python.exe`
+- 嵌入式 Python 运行时文件以及 `python*._pth`
+- 放在 `runtime/pyd` 下的标准库扩展模块
+- 放在 `Lib/site-packages` 下的 Python bridge 依赖
+- `tools/pycan_bridge.py` 与 `tools/pycan_runtime.py`
+
+因此下载得到的发布包**不需要**：
+
+- 额外在系统里安装 Python
+- 手工传 `--python`
+- 手工传 `--bridge-script`
+
+### 发布包的标准命令
+
+#### `gs_usb`
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if gs_usb --py-channel 0 --bitrate 1000000
+```
+
+#### `slcan`
+
+```powershell
+.\client.exe -i can1 -s 7D1 -t 7E1 -f 7E0 -b pycan_bridge --py-if slcan --py-channel COM4@9600 --bitrate 1000000
+```
+
+### 下载版 `client.exe` 参数说明
+
+| 参数 | 含义 | 文档中的典型值 |
+| --- | --- | --- |
+| `-i` | shell / transport 配置中使用的逻辑接口名 | `can1` |
+| `-s` | tester 物理源地址 | `7D1` |
+| `-t` | ECU 物理目标地址 | `7E1` |
+| `-f` | 功能寻址目标地址 | `7E0` |
+| `-b` | transport 后端 | `pycan_bridge` |
+| `--py-if` | Python bridge 选择的适配器族 | `gs_usb` 或 `slcan` |
+| `--py-channel` | 传给所选 Python bridge 后端的通道标识 | `0` 或 `COM4@9600` |
+| `--bitrate` | CAN 标称波特率 | `1000000` |
+
+### 如何配置 Python bridge 参数
+
+- `gs_usb` 类 USB CAN 适配器使用 `--py-if gs_usb --py-channel 0`。如果同时接了多个设备，再按实际枚举顺序调整通道号。
+- `slcan` / LAWICEL 风格串口适配器使用 `--py-if slcan --py-channel COMx@baud`，例如 `COM4@9600`。
+- `-s`、`-t`、`-f` 需要与你的 ECU / tester 寻址配置保持一致。
+- `--bitrate` 需要与实际 CAN 总线波特率一致。
+
+### 怎样判断发布包已经启动成功
+
+如果便携运行时已经工作，启动日志至少会走到：
+
+```text
+[Context] UDS Context Initialized (backend=pycan_bridge if=...)
+```
+
+如果后面出现 `NRC: 0xFF` 之类的负响应，那已经属于发布包启动之后的 ECU / 会话 / 服务侧问题，而不是 Python 运行时打包失败。
+
+## 6. 当前 Windows 文档里支持哪些 CAN 硬件
 
 按照当前仓库文档和 CLI 参数校验，Windows 侧目前只明确支持 **三类硬件路径**：
 
@@ -120,7 +183,7 @@ py -3 -m venv .venv
 
 虽然 `python-can` 本身还能支持更多接口族，但**本仓库当前默认 Windows 路径只校验并文档化了 `gs_usb` 和 `slcan`**。也就是说，当前 CLI 会拒绝其他 `--py-if` 取值，因此像 PCAN、Vector、Kvaser、ZLG、Canalyst 这类适配器，**在当前仓库里不应直接宣称为已支持**，除非后续先扩展代码路径。
 
-## 6. `gs_usb` 和 `slcan` 的区别
+## 7. `gs_usb` 和 `slcan` 的区别
 
 | 接口 | 含义 | 典型 channel 示例 | 适用场景 |
 | --- | --- | --- | --- |
@@ -133,7 +196,7 @@ py -3 -m venv .venv
 
 如果设备表现为 COM 口，或厂家文档明确写的是 SLCAN 兼容串口协议，就选 `slcan`。
 
-## 7. 为什么 Windows 不能直接复用 Linux 的终端实现
+## 8. 为什么 Windows 不能直接复用 Linux 的终端实现
 
 Windows 构建会编译：
 
@@ -151,7 +214,7 @@ Windows 构建会编译：
 
 所以项目不是简单复用 Linux shell，而是在保持命令模型一致的前提下，为 Windows 提供了独立 console 实现。
 
-## 8. 为什么 Windows 一般会比 Linux 更慢
+## 9. 为什么 Windows 一般会比 Linux 更慢
 
 在这个仓库里，Windows 客户端通常会比 Linux 路径多一层甚至多层软件栈。
 
@@ -179,7 +242,7 @@ Windows 推荐路径：
 - 尽量让 client 与 bridge 在同一台机器上本地运行
 - 如果你主要做高频交互或时延敏感调试，优先选择 Linux 主机路径
 
-## 9. 构建历史 `TSMASTER_API` smoke 目标
+## 10. 构建历史 `TSMASTER_API` smoke 目标
 
 只有在你已经具备匹配 TSMaster SDK 的前提下，才建议使用这一条路径。
 
@@ -198,7 +261,7 @@ cmake --preset windows-tsmaster-mingw64-inline-sdk
 cmake --build --preset build-client-smoke-inline-sdk
 ```
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### CMake 提示 Windows 支持未启用
 
