@@ -22,6 +22,7 @@ permissions:
 env:
   CLIENT_DEMO_DIR: examples/rtt_server/client_demo
   RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+  WINDOWS_EMBED_PYTHON_VERSION: 3.13.7
 
 concurrency:
   group: client-demo-cd-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || github.sha }}
@@ -96,6 +97,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup CPython for dependency vendoring
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
@@ -126,6 +133,8 @@ jobs:
 
           rm -rf "$asset_root"
           mkdir -p "$asset_root/tools"
+          mkdir -p "$asset_root/Lib/site-packages"
+          mkdir -p "$asset_root/runtime/pyd"
 
           cp build-mingw64/client.exe "$asset_root/"
           cp ../README.md "$asset_root/README.md"
@@ -134,8 +143,77 @@ jobs:
           cp tools/pycan_runtime.py "$asset_root/tools/"
           cp tools/requirements-pycan.txt "$asset_root/tools/"
 
+      - name: Download embedded Python runtime
+        shell: pwsh
+        working-directory: examples/rtt_server/client_demo
+        run: |
+          $assetRoot = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/dist/${{ env.RELEASE_TAG }}-windows-x86_64"
+          $embedVersion = "${{ env.WINDOWS_EMBED_PYTHON_VERSION }}"
+          $embedZip = Join-Path $env:RUNNER_TEMP "python-embed-amd64.zip"
+          $embedUrl = "https://www.python.org/ftp/python/$embedVersion/python-$embedVersion-embed-amd64.zip"
+
+          Invoke-WebRequest -Uri $embedUrl -OutFile $embedZip
+          Expand-Archive -Path $embedZip -DestinationPath $assetRoot -Force
+
+      - name: Move standard extension modules into runtime/pyd
+        shell: pwsh
+        working-directory: examples/rtt_server/client_demo
+        run: |
+          $assetRoot = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/dist/${{ env.RELEASE_TAG }}-windows-x86_64"
+          $pydRoot = Join-Path $assetRoot "runtime/pyd"
+
+          Get-ChildItem -Path $assetRoot -Filter "*.pyd" -File | ForEach-Object {
+            Move-Item -Path $_.FullName -Destination (Join-Path $pydRoot $_.Name) -Force
+          }
+
+      - name: Vendor bridge dependencies into embedded runtime
+        shell: pwsh
+        working-directory: examples/rtt_server/client_demo
+        run: |
+          $assetRoot = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/dist/${{ env.RELEASE_TAG }}-windows-x86_64"
+          $sitePackages = Join-Path $assetRoot "Lib/site-packages"
+          $requirements = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/tools/requirements-pycan.txt"
+          $pythonExe = (Get-Command python).Source
+          $pythonDir = Split-Path $pythonExe -Parent
+
+          python -m pip install --upgrade pip
+          python -m pip install --no-compile --target $sitePackages -r $requirements
+
+          Get-ChildItem -Path $pythonDir -Filter "vcruntime*.dll" -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $assetRoot -Force
+
+      - name: Configure embedded runtime search paths
+        shell: pwsh
+        working-directory: examples/rtt_server/client_demo
+        run: |
+          $assetRoot = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/dist/${{ env.RELEASE_TAG }}-windows-x86_64"
+          $pthFile = Get-ChildItem -Path $assetRoot -Filter "python*._pth" | Select-Object -First 1
+          if (-not $pthFile) {
+            throw "Embedded Python ._pth file was not found"
+          }
+
+          $pthBaseName = [System.IO.Path]::GetFileNameWithoutExtension($pthFile.Name)
+          $updated = @(
+            "$pthBaseName.zip"
+            "."
+            "runtime/pyd"
+            "Lib"
+            "Lib/site-packages"
+            "import site"
+          )
+          Set-Content -Path $pthFile.FullName -Value $updated -Encoding ascii
+
+      - name: Smoke test portable Python runtime
+        shell: pwsh
+        working-directory: examples/rtt_server/client_demo
+        run: |
+          $assetRoot = Join-Path $env:GITHUB_WORKSPACE "${{ env.CLIENT_DEMO_DIR }}/dist/${{ env.RELEASE_TAG }}-windows-x86_64"
+          & "$assetRoot/python.exe" -c "import socket; import can; import usb; import gs_usb; print('portable-python-ok')"
+          & "$assetRoot/python.exe" "$assetRoot/tools/pycan_bridge.py" --help
+
       - name: Create Windows release archive
         shell: pwsh
+        working-directory: examples/rtt_server/client_demo
         run: |
           $archiveBase = "dist/${{ env.RELEASE_TAG }}-windows-x86_64"
           $zipPath = "$archiveBase.zip"
