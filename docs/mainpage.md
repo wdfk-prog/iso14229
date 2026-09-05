@@ -22,6 +22,7 @@
 |  [`esp32_server`](examples/esp32_server/README.md ) | UDS Server on ESP32-C3-32S with Waveshare SN65HVD230 CAN Transciever. |
 |  [`s32k144_server`](examples/s32k144_server/README.md) | UDS Server on NXP S32K144 eval board with Waveshare SN65HVD230 CAN Transciever. | 
 |  [`stm32g474`](examples/stm32g474/README.md) | UDS Server on STM NUCLEO-G474RE eval board with Waveshare SN65HVD230 CAN Transciever. | 
+|  [`zephyr_server`](examples/zephyr_server/README.md) | UDS Server on Zephyr RTOS using Zephyr's native CAN + ISO-TP stack. Tested on (nucleo_g474re, native_sim). | 
 
 ## Supported Services {#supported-services}
 
