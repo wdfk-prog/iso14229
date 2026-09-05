@@ -5,7 +5,7 @@ This guide describes porting: setting up iso14229 to run on a new target for the
 In order to use this guide, you must have a C toolchain for your target, as well as an existing project which compiles successfully.
 
 > [!NOTE]
-> If your target uses linux, Windows, Arduino, or esp-idf, consider consulting the [examples](docs/mainpage.md#examples_sec) first. This guide mainly considers embedded targets without existing support.
+> If your target uses linux, Windows, Arduino, esp-idf, or Zephyr, consider consulting the [examples](docs/mainpage.md#examples_sec) first. This guide mainly considers embedded targets without existing support.
 
 If you encounter a problem while using this guide, please open an issue.
 
@@ -79,4 +79,5 @@ Either keep everything in the main context or in a dedicated RTOS task/thread.
 - [`esp32_server`](examples/esp32_server/README.md )
 - [`s32k144_server`](examples/s32k144_server/README.md) 
 - [`stm32g474`](examples/stm32g474/README.md) 
+- [`zephyr_server`](examples/zephyr_server/README.md) 
 
