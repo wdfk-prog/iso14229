@@ -16,7 +16,7 @@
 
 #if !defined(UDS_SYS)
 
-#if defined(__ZEPHYR__) // check before __unix__: native_sim links to host libc which also defines __unix__
+#if defined(__ZEPHYR__) // native_sim links w/host libc which also defines __unix__
 #define UDS_SYS UDS_SYS_ZEPHYR
 #elif defined(__unix__) || defined(__APPLE__)
 #define UDS_SYS UDS_SYS_UNIX
