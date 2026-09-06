@@ -29,6 +29,7 @@ extern "C" {
 #define UDS_SYS_ARDUINO 3
 #define UDS_SYS_ESP32 4
 #define UDS_SYS_ZEPHYR 5
+#define UDS_SYS_RTT 6
 /** @} */
 
 #if !defined(UDS_SYS)
@@ -36,6 +37,8 @@ extern "C" {
 #if defined(__ZEPHYR__)
 // checked before __unix__: native_sim links against the host libc, which also defines __unix__
 #define UDS_SYS UDS_SYS_ZEPHYR
+#elif defined(__RTTHREAD__)
+#define UDS_SYS UDS_SYS_RTT
 #elif defined(__unix__) || defined(__APPLE__)
 #define UDS_SYS UDS_SYS_UNIX
 #elif defined(_WIN32)
@@ -97,6 +100,29 @@ extern "C" {
 #endif // if UDS_SYS == UDS_SYS_ZEPHYR
 
 
+#if UDS_SYS == UDS_SYS_RTT
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+#include <rtt_uds_config.h>
+
+#define UDS_TP_ISOTP_C 1
+/* RT-Thread's formatter has its own conversion support, so skip libc format checks. */
+#define UDS_ENABLE_PRINTF_FORMAT_CHECK 0
+#define strnlen rt_strnlen
+#endif
+
+/**
+ * @def UDS_ENABLE_PRINTF_FORMAT_CHECK
+ * @brief Enables GCC/Clang printf format checks for the log interface.
+ * @details Defaults to 1. The RT-Thread port sets this to 0 because its formatter
+ *          supports a different set of conversions from libc printf.
+ */
+#ifndef UDS_ENABLE_PRINTF_FORMAT_CHECK
+#define UDS_ENABLE_PRINTF_FORMAT_CHECK 1
+#endif
 
 /**
  * @def UDS_SYS
@@ -761,7 +787,7 @@ static_assert(UDS_LOG_LEVEL == UDS_LOG_NONE || UDS_LOG_LEVEL == UDS_LOG_ERROR ||
 #define UDS_LOG_SDU(tag, buffer, buff_len, info) UDS_LogSDUDummy(tag, buffer, buff_len, info)
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if UDS_ENABLE_PRINTF_FORMAT_CHECK && (defined(__GNUC__) || defined(__clang__))
 #define UDS_PRINTF_FORMAT(fmt_index, first_arg)                                                    \
     __attribute__((format(printf, fmt_index, first_arg)))
 #else

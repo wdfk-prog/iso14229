@@ -5,6 +5,7 @@ filegroup(
     srcs = [
         "client.c",
         "log.c",
+        "sys_rtt_log.c",
         "server.c",
         "tp.c",
         "util.c",
@@ -26,6 +27,7 @@ filegroup(
         "log.h",
         "server.h",
         "sys.h",
+        "sys_rtt.h",
         "tp.h",
         "uds.h",
         "util.h",

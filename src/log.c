@@ -1,4 +1,7 @@
 #include "log.h"
+
+/* RTT supplies the same log interface in sys_rtt_log.c. */
+#if UDS_SYS != UDS_SYS_RTT
 #include "tp.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -21,4 +24,5 @@ void UDS_LogSDUInternal(UDS_LogLevel_t level, const char *tag, const uint8_t *bu
     }
     UDS_LogWrite(level, tag, "\n");
 }
+#endif
 #endif

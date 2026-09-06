@@ -24,5 +24,7 @@ This page lists the public compile-time configuration API
 | `UDS_CLIENT_SEND_BUF_SIZE` | 4095 | - | Send buffer size |
 | `UDS_CLIENT_RECV_BUF_SIZE` | 4095 | - | Receive buffer size |
 
-- *except on `UDS_SYS=UDS_SYS_ARDUINO` and `UDS_SYS=UDS_SYS_ESP32`, where `UDS_TP_ISOTP_C` is set by default.
+- *except on `UDS_SYS=UDS_SYS_ARDUINO`, `UDS_SYS=UDS_SYS_ESP32`, and `UDS_SYS=UDS_SYS_RTT`, where `UDS_TP_ISOTP_C` is set by default.
 - **except on `UDS_SYS=UDS_SYS_ZEPHYR`, where `UDS_TP_ISOTP_ZEPHYR` is set by default.
+
+For RT-Thread, define `__RTTHREAD__` or explicitly set `UDS_SYS=UDS_SYS_RTT` in the build configuration. Use the symbolic system name: `UDS_SYS_RTT` is `6`, while `5` selects Zephyr. The RT-Thread port provides `UDSMillis()` from the RT-Thread tick counter and uses ULOG when enabled, otherwise `rt_kprintf`. See the [RT-Thread example](../examples/rtt_server/README.md) for the required configuration header and Kconfig options.

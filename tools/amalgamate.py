@@ -69,6 +69,7 @@ with open(args.out_c, "w", encoding="utf-8") as f:
         "src/tp.c",
         "src/util.c",
         "src/log.c",
+        "src/sys_rtt_log.c",
         "src/tp/isotp_c.c",
         "src/tp/isotp_c_socketcan.c",
         "src/tp/isotp_sock.c",
@@ -107,6 +108,7 @@ extern "C" {
     for src in [
         "src/version.h",
         "src/sys.h",
+        "src/sys_rtt.h",
         "src/config.h",
         "src/tp.h",
         "src/uds.h",

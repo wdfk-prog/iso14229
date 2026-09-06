@@ -106,7 +106,7 @@ static_assert(UDS_LOG_LEVEL == UDS_LOG_NONE || UDS_LOG_LEVEL == UDS_LOG_ERROR ||
 #define UDS_LOG_SDU(tag, buffer, buff_len, info) UDS_LogSDUDummy(tag, buffer, buff_len, info)
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if UDS_ENABLE_PRINTF_FORMAT_CHECK && (defined(__GNUC__) || defined(__clang__))
 #define UDS_PRINTF_FORMAT(fmt_index, first_arg)                                                    \
     __attribute__((format(printf, fmt_index, first_arg)))
 #else

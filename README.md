@@ -17,7 +17,7 @@
 - Highly portable. Write your implementation once, it works everywhere.
 - Static memory allocation. (no `malloc`, `calloc`, ...)
 - Built-in ISO-TP transports: isotp-c, linux isotp sockets
-- Examples for esp32, Arduino, NXP S32K144, STM32, Zephyr
+- Examples for esp32, Arduino, NXP S32K144, STM32, Zephyr, RT-Thread
 - Heavily tested: unit, fuzz, coverage
 
 API status: Major version zero (0.y.z) **(not yet stable)**. Anything MAY change at any time.

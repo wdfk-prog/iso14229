@@ -1,6 +1,16 @@
 #pragma once
 
 /**
+ * @def UDS_ENABLE_PRINTF_FORMAT_CHECK
+ * @brief Enables GCC/Clang printf format checks for the log interface.
+ * @details Defaults to 1. The RT-Thread port sets this to 0 because its formatter
+ *          supports a different set of conversions from libc printf.
+ */
+#ifndef UDS_ENABLE_PRINTF_FORMAT_CHECK
+#define UDS_ENABLE_PRINTF_FORMAT_CHECK 1
+#endif
+
+/**
  * @def UDS_SYS
  * @brief Selects the host system iso14229 is compiled for.
  * @see uds_sys_ for the list of valid values

@@ -23,9 +23,11 @@ uint32_t UDSMillis(void) {
     return esp_timer_get_time() / 1000;
 #elif UDS_SYS == UDS_SYS_ZEPHYR
     return k_uptime_get_32();
+#elif UDS_SYS == UDS_SYS_RTT
+    return (uint32_t)rt_tick_get_millisecond();
 #else
 #error "UDSMillis not implemented for this UDS_SYS"
-#endif
+#endif // UDS_SYS == UDS_SYS_UNIX
 }
 #endif // defined(UDS_CUSTOM_MILLIS)
 

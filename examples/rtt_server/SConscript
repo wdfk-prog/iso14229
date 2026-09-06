@@ -1,0 +1,14 @@
+from building import *
+import os
+
+cwd = GetCurrentDir()
+path = [cwd, os.path.join(cwd, 'main')]
+src = [os.path.join(cwd, 'main', 'iso14229.c')]
+
+if GetDepend('UDS_USING_EXAMPLE'):
+    src.append(os.path.join(cwd, 'main', 'rtt_uds_example.c'))
+
+group = DefineGroup('can_uds', src, depend=['PKG_USING_ISO14229'], CPPPATH=path,
+                    LOCAL_CCFLAGS=['-std=c11', '-D__RTTHREAD__'])
+
+Return('group')

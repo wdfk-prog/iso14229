@@ -1037,6 +1037,7 @@ INPUT                  = docs/mainpage.md \
                          examples/esp32_server/README.md \
                          examples/linux_rdbi_wdbi/README.md \
                          examples/linux_security_access/README.md \
+                         examples/rtt_server/README.md \
                          examples/s32k144_server/README.md \
                          examples/stm32g474/README.md 
 
